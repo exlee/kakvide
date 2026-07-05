@@ -1,8 +1,207 @@
   <key>CFBundleDocumentTypes</key>
   <array>
     <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>txt</string>
+        <string>text</string>
+        <string>utf8</string>
+      </array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array>
+        <string>text/plain</string>
+      </array>
       <key>CFBundleTypeName</key>
-      <string>Any File</string>
+      <string>Plain Text File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>markdown</string>
+        <string>markd</string>
+        <string>mdown</string>
+        <string>md</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>Markdown document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>net.daringfireball.markdown</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>json</string>
+        <string>jsonc</string>
+        <string>json5</string>
+      </array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array>
+        <string>application/json</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>JSON document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.json</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>toml</string>
+      </array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array>
+        <string>application/toml</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>TOML document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.vim.toml-file</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>yaml</string>
+        <string>yml</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>YAML document</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.vim.yaml-file</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>rs</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>Rust Source File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.rust-lang.rust-script</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>go</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>Go Source File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.golang.go-script</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>ts</string>
+        <string>tsx</string>
+        <string>cts</string>
+        <string>mts</string>
+      </array>
+      <key>CFBundleTypeMIMETypes</key>
+      <array>
+        <string>application/typescript</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>TypeScript Source File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>org.vim.typescript-source</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>js</string>
+        <string>javascript</string>
+        <string>c</string>
+        <string>h</string>
+        <string>cc</string>
+        <string>cpp</string>
+        <string>cxx</string>
+        <string>hpp</string>
+        <string>java</string>
+        <string>py</string>
+        <string>rb</string>
+        <string>sh</string>
+        <string>bash</string>
+        <string>zsh</string>
+        <string>lua</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>Source File</string>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Alternate</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.source-code</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
+      <array>
+        <string>*</string>
+      </array>
+      <key>CFBundleTypeName</key>
+      <string>Text File</string>
+      <key>CFBundleTypeOSTypes</key>
+      <array>
+        <string>****</string>
+      </array>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+    </dict>
+    <dict>
+      <key>CFBundleTypeName</key>
+      <string>All Files</string>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>
@@ -10,6 +209,126 @@
       <key>LSItemContentTypes</key>
       <array>
         <string>public.data</string>
+        <string>public.content</string>
       </array>
+    </dict>
+  </array>
+  <key>UTExportedTypeDeclarations</key>
+  <array>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>Markdown document</string>
+      <key>UTTypeIdentifier</key>
+      <string>net.daringfireball.markdown</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>markdown</string>
+          <string>markd</string>
+          <string>mdown</string>
+          <string>md</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>TOML document</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.vim.toml-file</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>toml</string>
+        </array>
+        <key>public.mime-type</key>
+        <string>application/toml</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>YAML document</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.vim.yaml-file</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>yaml</string>
+          <string>yml</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.source-code</string>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>TypeScript Source File</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.vim.typescript-source</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>ts</string>
+          <string>tsx</string>
+          <string>cts</string>
+          <string>mts</string>
+        </array>
+        <key>public.mime-type</key>
+        <string>application/typescript</string>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.source-code</string>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>Rust Source File</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.rust-lang.rust-script</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>rs</string>
+        </array>
+      </dict>
+    </dict>
+    <dict>
+      <key>UTTypeConformsTo</key>
+      <array>
+        <string>public.source-code</string>
+        <string>public.plain-text</string>
+      </array>
+      <key>UTTypeDescription</key>
+      <string>Go Source File</string>
+      <key>UTTypeIdentifier</key>
+      <string>org.golang.go-script</string>
+      <key>UTTypeTagSpecification</key>
+      <dict>
+        <key>public.filename-extension</key>
+        <array>
+          <string>go</string>
+        </array>
+      </dict>
     </dict>
   </array>

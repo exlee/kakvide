@@ -25,6 +25,8 @@ mod input;
 mod kakoune_messages;
 mod kakoune_process;
 mod layout;
+#[cfg(target_os = "macos")]
+mod macos_open_files;
 mod render;
 mod user_keys;
 
@@ -117,6 +119,10 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
     };
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
+    #[cfg(target_os = "macos")]
+    if let Err(error) = macos_open_files::register_open_file_handler(event_loop.create_proxy()) {
+        eprintln!("open file handler setup failed: {error:#}");
+    }
     let attrs = apply_platform_window_attributes(
         WindowAttributes::default()
             .with_title("kakvide")
@@ -166,6 +172,11 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
             }
             Event::UserEvent(AppEvent::KakouneExited) => {
                 elwt.exit();
+            }
+            Event::UserEvent(AppEvent::OpenFiles(paths)) => {
+                for path in paths {
+                    send_keys(&command_tx, &[edit_file_keys(&path)]);
+                }
             }
             Event::WindowEvent { event, .. } => match event {
                 WindowEvent::CloseRequested => {
@@ -323,13 +334,25 @@ fn print_combined_help(kak_bin: &OsStr) -> Result<()> {
     }
 }
 
+fn edit_file_keys(path: &Path) -> String {
+    format!(":edit {}<ret>", kakoune_single_quote(path))
+}
+
+fn kakoune_single_quote(path: &Path) -> String {
+    let path = path.to_string_lossy();
+    format!("'{}'", path.replace('\'', "''"))
+}
+
 #[cfg(test)]
 mod tests {
     use std::ffi::OsString;
     use std::path::Path;
     use std::path::PathBuf;
 
-    use super::{default_launch_directory, extract_kak_bin, should_show_combined_help};
+    use super::{
+        default_launch_directory, edit_file_keys, extract_kak_bin, kakoune_single_quote,
+        should_show_combined_help,
+    };
 
     #[test]
     fn top_level_help_triggers_combined_help() {
@@ -392,5 +415,29 @@ mod tests {
     #[test]
     fn launch_directory_ignores_missing_home() {
         assert_eq!(default_launch_directory(Path::new("/"), None), None);
+    }
+
+    #[test]
+    fn kakoune_quote_preserves_spaces() {
+        assert_eq!(
+            kakoune_single_quote(Path::new("/tmp/file with spaces.md")),
+            "'/tmp/file with spaces.md'"
+        );
+    }
+
+    #[test]
+    fn kakoune_quote_escapes_single_quotes() {
+        assert_eq!(
+            kakoune_single_quote(Path::new("/tmp/alice's note.md")),
+            "'/tmp/alice''s note.md'"
+        );
+    }
+
+    #[test]
+    fn edit_file_keys_opens_quoted_path() {
+        assert_eq!(
+            edit_file_keys(Path::new("/tmp/alice's note.md")),
+            ":edit '/tmp/alice''s note.md'<ret>"
+        );
     }
 }

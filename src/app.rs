@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::fs;
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -40,6 +41,7 @@ impl Default for AppConfig {
 pub enum AppEvent {
     Rpc(Box<KakouneNotification>),
     KakouneExited,
+    OpenFiles(Vec<PathBuf>),
 }
 
 #[derive(Debug, Clone)]
