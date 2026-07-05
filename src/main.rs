@@ -21,6 +21,8 @@ use winit::dpi::LogicalSize;
 use winit::event::{ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
+#[cfg(target_os = "macos")]
+use winit::platform::macos::WindowAttributesExtMacOS;
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::window::WindowLevel;
 use winit::window::{Window, WindowAttributes};
@@ -41,6 +43,7 @@ struct Args {
 struct AppConfig {
     font_family: String,
     font_size: f32,
+    transparent_menubar: bool,
 }
 
 impl Default for AppConfig {
@@ -48,6 +51,7 @@ impl Default for AppConfig {
         Self {
             font_family: "SF Mono".to_string(),
             font_size: 15.0,
+            transparent_menubar: true,
         }
     }
 }
@@ -202,15 +206,40 @@ fn load_config() -> Result<AppConfig> {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn apply_platform_window_attributes(
+    attrs: WindowAttributes,
+    config: &AppConfig,
+) -> WindowAttributes {
+    if config.transparent_menubar {
+        attrs
+            .with_titlebar_transparent(true)
+            .with_fullsize_content_view(true)
+    } else {
+        attrs
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apply_platform_window_attributes(
+    attrs: WindowAttributes,
+    _config: &AppConfig,
+) -> WindowAttributes {
+    attrs
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
     let config = load_config()?;
 
     let event_loop = EventLoop::<AppEvent>::with_user_event().build()?;
-    let attrs = WindowAttributes::default()
-        .with_title("kakvide")
-        .with_window_level(WindowLevel::Normal)
-        .with_inner_size(LogicalSize::new(1200.0, 800.0));
+    let attrs = apply_platform_window_attributes(
+        WindowAttributes::default()
+            .with_title("kakvide")
+            .with_window_level(WindowLevel::Normal)
+            .with_inner_size(LogicalSize::new(1200.0, 800.0)),
+        &config,
+    );
     let window = Rc::new(event_loop.create_window(attrs)?);
     let renderer = load_renderer(&config);
     let context = SoftContext::new(window.clone()).map_err(|error| anyhow!(error.to_string()))?;
@@ -1148,5 +1177,6 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.font_family, "SF Mono");
         assert_eq!(config.font_size, 15.0);
+        assert!(config.transparent_menubar);
     }
 }
