@@ -270,7 +270,7 @@ mod tests {
         let config = AppConfig::default();
         assert_eq!(config.font_family, "SF Mono");
         assert_eq!(config.font_size, 15.0);
-        assert_eq!(config.mouse_scroll_rate, 0.5);
+        assert_eq!(config.mouse_scroll_rate, 0.25);
         assert!(config.transparent_menubar);
         assert_eq!(config.keys, UserKeysConfig::default());
     }

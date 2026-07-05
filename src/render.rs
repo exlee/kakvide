@@ -648,17 +648,18 @@ fn render_info(
 
     let rect = info_rect(info, menu_rect, cols, rows, width, height);
     fill_rect(canvas, rect, &info.face, metrics, top_padding);
+    let rendered_info = modal_background_info(info);
 
     if framed {
-        render_framed_info(canvas, info, rect, metrics, top_padding);
+        render_framed_info(canvas, &rendered_info, rect, metrics, top_padding);
     } else {
-        for (index, line) in info.content.iter().take(rect.height).enumerate() {
+        for (index, line) in rendered_info.content.iter().take(rect.height).enumerate() {
             render_line_at(
                 canvas,
                 rect.row + index,
                 rect.column,
                 line,
-                &info.face,
+                &rendered_info.face,
                 rect.column + rect.width,
                 metrics,
                 top_padding,
@@ -797,6 +798,24 @@ fn render_framed_info_body(
         metrics,
         top_padding,
     );
+}
+
+fn modal_background_info(info: &InfoState) -> InfoState {
+    if !matches!(info.style, InfoStyle::Modal) {
+        return info.clone();
+    }
+
+    InfoState {
+        title: line_with_background(&info.title, &info.face.bg),
+        content: info
+            .content
+            .iter()
+            .map(|line| line_with_background(line, &info.face.bg))
+            .collect(),
+        anchor: info.anchor,
+        face: info.face.clone(),
+        style: info.style,
+    }
 }
 
 fn info_rect(
@@ -1153,6 +1172,18 @@ fn truncate_atoms(line: &[Atom], max_width: usize) -> Vec<Atom> {
     result
 }
 
+fn line_with_background(line: &[Atom], bg: &str) -> Vec<Atom> {
+    line.iter()
+        .map(|atom| Atom {
+            face: Face {
+                bg: bg.to_string(),
+                ..atom.face.clone()
+            },
+            contents: atom.contents.clone(),
+        })
+        .collect()
+}
+
 fn fill_cells(
     canvas: &Canvas,
     column: usize,
@@ -1482,6 +1513,80 @@ mod tests {
         assert_eq!(layout.visible_columns, 6);
         assert_eq!(layout.total_columns, 6);
         assert_eq!(layout.column_width, 6);
+    }
+
+    #[test]
+    fn modal_background_info_overrides_title_and_content_backgrounds() {
+        let info = InfoState {
+            title: vec![Atom {
+                face: Face {
+                    fg: "white".into(),
+                    bg: "red".into(),
+                    underline: "default".into(),
+                    attributes: Vec::new(),
+                },
+                contents: "title".into(),
+            }],
+            content: vec![vec![Atom {
+                face: Face {
+                    fg: "black".into(),
+                    bg: "blue".into(),
+                    underline: "default".into(),
+                    attributes: Vec::new(),
+                },
+                contents: "body".into(),
+            }]],
+            anchor: Coord { line: 0, column: 0 },
+            face: Face {
+                fg: "default".into(),
+                bg: "green".into(),
+                underline: "default".into(),
+                attributes: Vec::new(),
+            },
+            style: InfoStyle::Modal,
+        };
+
+        let rendered = modal_background_info(&info);
+        assert_eq!(rendered.title[0].face.bg, "green");
+        assert_eq!(rendered.title[0].face.fg, "white");
+        assert_eq!(rendered.content[0][0].face.bg, "green");
+        assert_eq!(rendered.content[0][0].face.fg, "black");
+    }
+
+    #[test]
+    fn non_modal_info_keeps_original_backgrounds() {
+        let info = InfoState {
+            title: vec![Atom {
+                face: Face {
+                    fg: "white".into(),
+                    bg: "red".into(),
+                    underline: "default".into(),
+                    attributes: Vec::new(),
+                },
+                contents: "title".into(),
+            }],
+            content: vec![vec![Atom {
+                face: Face {
+                    fg: "black".into(),
+                    bg: "blue".into(),
+                    underline: "default".into(),
+                    attributes: Vec::new(),
+                },
+                contents: "body".into(),
+            }]],
+            anchor: Coord { line: 0, column: 0 },
+            face: Face {
+                fg: "default".into(),
+                bg: "green".into(),
+                underline: "default".into(),
+                attributes: Vec::new(),
+            },
+            style: InfoStyle::Prompt,
+        };
+
+        let rendered = modal_background_info(&info);
+        assert_eq!(rendered.title[0].face.bg, "red");
+        assert_eq!(rendered.content[0][0].face.bg, "blue");
     }
 
     #[test]
