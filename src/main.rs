@@ -157,6 +157,13 @@ struct CellMetrics {
     baseline_offset: f32,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct LayoutMetrics {
+    top_padding: usize,
+    cols: usize,
+    rows: usize,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Rgb {
     r: u8,
@@ -234,7 +241,7 @@ fn main() -> Result<()> {
     let mut did_force_startup_resize = false;
     let mut state = AppState::default();
 
-    send_resize(&command_tx, &window, &renderer);
+    send_resize(&command_tx, &window, &renderer, &config);
     window.request_redraw();
 
     event_loop.run(move |event, elwt| {
@@ -242,7 +249,7 @@ fn main() -> Result<()> {
 
         match event {
             Event::Resumed => {
-                send_resize(&command_tx, &window, &renderer);
+                send_resize(&command_tx, &window, &renderer, &config);
                 window.request_redraw();
             }
             Event::UserEvent(AppEvent::Rpc(notification)) => {
@@ -250,7 +257,7 @@ fn main() -> Result<()> {
                     && !did_force_startup_resize;
                 apply_notification(&mut state, notification);
                 if should_force_resize {
-                    send_resize(&command_tx, &window, &renderer);
+                    send_resize(&command_tx, &window, &renderer, &config);
                     did_force_startup_resize = true;
                 }
                 window.request_redraw();
@@ -267,11 +274,11 @@ fn main() -> Result<()> {
                     if let Err(error) = resize_surface(&mut surface, size) {
                         eprintln!("surface resize failed: {error:#}");
                     }
-                    send_resize(&command_tx, &window, &renderer);
+                    send_resize(&command_tx, &window, &renderer, &config);
                     window.request_redraw();
                 }
                 WindowEvent::RedrawRequested => {
-                    if let Err(error) = render(&window, &mut surface, &state, &renderer) {
+                    if let Err(error) = render(&window, &mut surface, &state, &renderer, &config) {
                         eprintln!("render failed: {error:#}");
                         let _ = child.kill();
                         elwt.exit();
@@ -297,8 +304,9 @@ fn main() -> Result<()> {
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    mouse_cell =
-                        pointer_position_to_coord(position.x, position.y, &renderer, &window);
+                    mouse_cell = pointer_position_to_coord(
+                        position.x, position.y, &renderer, &window, &config,
+                    );
                     send_mouse_move(&command_tx, mouse_cell);
                 }
                 WindowEvent::MouseInput { state, button, .. } => match state {
@@ -315,7 +323,7 @@ fn main() -> Result<()> {
                     }
                 }
                 WindowEvent::ScaleFactorChanged { .. } => {
-                    send_resize(&command_tx, &window, &renderer);
+                    send_resize(&command_tx, &window, &renderer, &config);
                     window.request_redraw();
                 }
                 _ => {}
@@ -491,6 +499,7 @@ fn render(
     surface: &mut Surface<Rc<Window>, Rc<Window>>,
     state: &AppState,
     renderer: &Renderer,
+    config: &AppConfig,
 ) -> Result<()> {
     let size = window.inner_size();
     let width = size.width.max(1) as usize;
@@ -516,7 +525,14 @@ fn render(
         .context("failed to wrap Skia surface around window buffer")?;
     let canvas = skia_surface.canvas();
 
-    render_canvas(canvas, width, height, state, &metrics);
+    render_canvas(
+        canvas,
+        width,
+        height,
+        state,
+        &metrics,
+        layout_metrics(width, height, &metrics, config.transparent_menubar),
+    );
 
     buffer
         .present()
@@ -526,16 +542,17 @@ fn render(
 
 fn render_canvas(
     canvas: &Canvas,
-    width: usize,
-    height: usize,
+    _width: usize,
+    _height: usize,
     state: &AppState,
     metrics: &CellMetrics,
+    layout: LayoutMetrics,
 ) {
     let bg = resolve_color(&state.grid.default_face.bg, FALLBACK_BG).to_color();
     canvas.clear(bg);
 
-    let cols = width.saturating_sub(PADDING * 2) / metrics.cell_width.max(1);
-    let rows = height.saturating_sub(PADDING * 2) / metrics.cell_height.max(1);
+    let cols = layout.cols;
+    let rows = layout.rows;
     let status_rows = usize::from(state.status.is_some());
     let content_rows = rows.saturating_sub(status_rows);
 
@@ -547,20 +564,35 @@ fn render_canvas(
             &state.grid.default_face,
             cols,
             metrics,
+            layout.top_padding,
         );
     }
 
     if let Some(status) = &state.status {
-        render_status(canvas, rows, cols, status, metrics);
+        render_status(canvas, rows, cols, status, metrics, layout.top_padding);
     }
 
-    let menu_rect = state
-        .menu
-        .as_ref()
-        .and_then(|menu| render_menu(canvas, menu, cols, content_rows, metrics));
+    let menu_rect = state.menu.as_ref().and_then(|menu| {
+        render_menu(
+            canvas,
+            menu,
+            cols,
+            content_rows,
+            metrics,
+            layout.top_padding,
+        )
+    });
 
     if let Some(info) = &state.info {
-        render_info(canvas, info, menu_rect, cols, content_rows, metrics);
+        render_info(
+            canvas,
+            info,
+            menu_rect,
+            cols,
+            content_rows,
+            metrics,
+            layout.top_padding,
+        );
     }
 }
 
@@ -570,9 +602,17 @@ fn render_status(
     cols: usize,
     status: &StatusState,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
     let row = total_rows.saturating_sub(1);
-    fill_line_background(canvas, row, cols, &status.default_face, metrics);
+    fill_line_background(
+        canvas,
+        row,
+        cols,
+        &status.default_face,
+        metrics,
+        top_padding,
+    );
 
     let mut prompt_line = status.prompt.clone();
     prompt_line.extend(status.content.clone());
@@ -594,6 +634,7 @@ fn render_status(
             &status.default_face,
             prompt_limit,
             metrics,
+            top_padding,
         );
     }
 
@@ -606,6 +647,7 @@ fn render_status(
             &status.default_face,
             cols,
             metrics,
+            top_padding,
         );
     }
 }
@@ -624,6 +666,7 @@ fn render_menu(
     cols: usize,
     rows: usize,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) -> Option<CellRect> {
     if cols == 0 || rows == 0 || menu.items.is_empty() {
         return None;
@@ -659,7 +702,7 @@ fn render_menu(
         width,
         height,
     };
-    fill_rect(canvas, rect, &menu.menu_face, metrics);
+    fill_rect(canvas, rect, &menu.menu_face, metrics, top_padding);
 
     for (index, item) in menu.items.iter().take(height).enumerate() {
         let face = if menu.selected == Some(index) {
@@ -674,6 +717,7 @@ fn render_menu(
             rect.width,
             face,
             metrics,
+            top_padding,
         );
         render_line_at(
             canvas,
@@ -683,6 +727,7 @@ fn render_menu(
             face,
             rect.column + rect.width,
             metrics,
+            top_padding,
         );
     }
 
@@ -696,6 +741,7 @@ fn render_info(
     cols: usize,
     rows: usize,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
     if cols == 0 || rows == 0 {
         return;
@@ -718,10 +764,10 @@ fn render_info(
     }
 
     let rect = info_rect(info, menu_rect, cols, rows, width, height);
-    fill_rect(canvas, rect, &info.face, metrics);
+    fill_rect(canvas, rect, &info.face, metrics, top_padding);
 
     if framed {
-        render_framed_info(canvas, info, rect, metrics);
+        render_framed_info(canvas, info, rect, metrics, top_padding);
     } else {
         for (index, line) in info.content.iter().take(rect.height).enumerate() {
             render_line_at(
@@ -732,12 +778,19 @@ fn render_info(
                 &info.face,
                 rect.column + rect.width,
                 metrics,
+                top_padding,
             );
         }
     }
 }
 
-fn render_framed_info(canvas: &Canvas, info: &InfoState, rect: CellRect, metrics: &CellMetrics) {
+fn render_framed_info(
+    canvas: &Canvas,
+    info: &InfoState,
+    rect: CellRect,
+    metrics: &CellMetrics,
+    top_padding: usize,
+) {
     if rect.width < 2 || rect.height < 2 {
         return;
     }
@@ -752,7 +805,15 @@ fn render_framed_info(canvas: &Canvas, info: &InfoState, rect: CellRect, metrics
         let dash_width = inner_width.saturating_sub(title_width + 2);
         top.push_str(&"─".repeat(dash_width / 2));
         top.push('┤');
-        render_string_line(canvas, rect.row, rect.column, &top, &info.face, metrics);
+        render_string_line(
+            canvas,
+            rect.row,
+            rect.column,
+            &top,
+            &info.face,
+            metrics,
+            top_padding,
+        );
         render_line_at(
             canvas,
             rect.row,
@@ -761,6 +822,7 @@ fn render_framed_info(canvas: &Canvas, info: &InfoState, rect: CellRect, metrics
             &info.face,
             rect.column + rect.width,
             metrics,
+            top_padding,
         );
         let mut right = String::from("├");
         right.push_str(&"─".repeat(dash_width - dash_width / 2));
@@ -772,12 +834,21 @@ fn render_framed_info(canvas: &Canvas, info: &InfoState, rect: CellRect, metrics
             &right,
             &info.face,
             metrics,
+            top_padding,
         );
-        return render_framed_info_body(canvas, info, rect, metrics);
+        return render_framed_info_body(canvas, info, rect, metrics, top_padding);
     }
     top.push_str("─╮");
-    render_string_line(canvas, rect.row, rect.column, &top, &info.face, metrics);
-    render_framed_info_body(canvas, info, rect, metrics);
+    render_string_line(
+        canvas,
+        rect.row,
+        rect.column,
+        &top,
+        &info.face,
+        metrics,
+        top_padding,
+    );
+    render_framed_info_body(canvas, info, rect, metrics, top_padding);
 }
 
 fn render_framed_info_body(
@@ -785,13 +856,22 @@ fn render_framed_info_body(
     info: &InfoState,
     rect: CellRect,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
     let inner_width = rect.width.saturating_sub(4);
     let body_rows = rect.height.saturating_sub(2);
     for row_offset in 0..body_rows {
         let row = rect.row + 1 + row_offset;
         if let Some(line) = info.content.get(row_offset) {
-            render_string_line(canvas, row, rect.column, "│ ", &info.face, metrics);
+            render_string_line(
+                canvas,
+                row,
+                rect.column,
+                "│ ",
+                &info.face,
+                metrics,
+                top_padding,
+            );
             render_line_at(
                 canvas,
                 row,
@@ -800,6 +880,7 @@ fn render_framed_info_body(
                 &info.face,
                 rect.column + 2 + inner_width,
                 metrics,
+                top_padding,
             );
             render_string_line(
                 canvas,
@@ -808,6 +889,7 @@ fn render_framed_info_body(
                 " │",
                 &info.face,
                 metrics,
+                top_padding,
             );
         } else {
             render_string_line(
@@ -817,6 +899,7 @@ fn render_framed_info_body(
                 &format!("│ {} │", " ".repeat(inner_width)),
                 &info.face,
                 metrics,
+                top_padding,
             );
         }
     }
@@ -829,6 +912,7 @@ fn render_framed_info_body(
         &bottom,
         &info.face,
         metrics,
+        top_padding,
     );
 }
 
@@ -911,8 +995,18 @@ fn render_line(
     default_face: &Face,
     max_columns: usize,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
-    render_line_at(canvas, row, 0, line, default_face, max_columns, metrics);
+    render_line_at(
+        canvas,
+        row,
+        0,
+        line,
+        default_face,
+        max_columns,
+        metrics,
+        top_padding,
+    );
 }
 
 fn render_line_at(
@@ -923,8 +1017,9 @@ fn render_line_at(
     default_face: &Face,
     max_columns: usize,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
-    let top = PADDING + row * metrics.cell_height;
+    let top = top_padding + row * metrics.cell_height;
     let mut column = start_column;
     let mut bg_paint = Paint::default();
     bg_paint.set_anti_alias(false);
@@ -987,6 +1082,7 @@ fn fill_line_background(
     cols: usize,
     default_face: &Face,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
     let bg = resolve_face_color(&default_face.bg, &default_face.bg, FALLBACK_BG).to_color();
     let mut paint = Paint::default();
@@ -994,7 +1090,7 @@ fn fill_line_background(
     fill_cells(
         canvas,
         0,
-        PADDING + row * metrics.cell_height,
+        top_padding + row * metrics.cell_height,
         cols,
         metrics,
         &paint,
@@ -1008,6 +1104,7 @@ fn fill_line_segment(
     width: usize,
     face: &Face,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
     let bg = resolve_face_color(&face.bg, &face.bg, FALLBACK_BG).to_color();
     let mut paint = Paint::default();
@@ -1015,16 +1112,30 @@ fn fill_line_segment(
     fill_cells(
         canvas,
         column,
-        PADDING + row * metrics.cell_height,
+        top_padding + row * metrics.cell_height,
         width,
         metrics,
         &paint,
     );
 }
 
-fn fill_rect(canvas: &Canvas, rect: CellRect, face: &Face, metrics: &CellMetrics) {
+fn fill_rect(
+    canvas: &Canvas,
+    rect: CellRect,
+    face: &Face,
+    metrics: &CellMetrics,
+    top_padding: usize,
+) {
     for row in rect.row..rect.row + rect.height {
-        fill_line_segment(canvas, row, rect.column, rect.width, face, metrics);
+        fill_line_segment(
+            canvas,
+            row,
+            rect.column,
+            rect.width,
+            face,
+            metrics,
+            top_padding,
+        );
     }
 }
 
@@ -1035,6 +1146,7 @@ fn render_string_line(
     text: &str,
     default_face: &Face,
     metrics: &CellMetrics,
+    top_padding: usize,
 ) {
     if text.is_empty() {
         return;
@@ -1052,6 +1164,7 @@ fn render_string_line(
         default_face,
         column + atom_display_width(text),
         metrics,
+        top_padding,
     );
 }
 
@@ -1125,16 +1238,20 @@ fn draw_glyph(
     canvas.draw_str(text, (left as f32, baseline), &metrics.font, paint);
 }
 
-fn send_resize(tx: &Sender<String>, window: &Window, renderer: &Renderer) {
+fn send_resize(tx: &Sender<String>, window: &Window, renderer: &Renderer, config: &AppConfig) {
     let size = window.inner_size();
     let metrics = renderer.metrics(window.scale_factor());
-    let cols = ((size.width as usize).saturating_sub(PADDING * 2) / metrics.cell_width).max(1);
-    let rows = ((size.height as usize).saturating_sub(PADDING * 2) / metrics.cell_height).max(1);
+    let layout = layout_metrics(
+        size.width as usize,
+        size.height as usize,
+        &metrics,
+        config.transparent_menubar,
+    );
     send_request(
         tx,
         KakouneRequest::Resize {
-            rows,
-            columns: cols,
+            rows: layout.rows,
+            columns: layout.cols,
         },
     );
 }
@@ -1171,12 +1288,53 @@ fn send_request(tx: &Sender<String>, request: KakouneRequest) {
     let _ = tx.send(request.to_json_line());
 }
 
-fn pointer_position_to_coord(x: f64, y: f64, renderer: &Renderer, window: &Window) -> Coord {
+fn pointer_position_to_coord(
+    x: f64,
+    y: f64,
+    renderer: &Renderer,
+    window: &Window,
+    config: &AppConfig,
+) -> Coord {
     let metrics = renderer.metrics(window.scale_factor());
+    let top_padding = content_top_padding(&metrics, config.transparent_menubar);
     let column =
         ((x - PADDING as f64).max(0.0) / metrics.cell_width.max(1) as f64).floor() as usize;
-    let line = ((y - PADDING as f64).max(0.0) / metrics.cell_height.max(1) as f64).floor() as usize;
+    let line =
+        ((y - top_padding as f64).max(0.0) / metrics.cell_height.max(1) as f64).floor() as usize;
     Coord { line, column }
+}
+
+fn content_top_padding(metrics: &CellMetrics, transparent_menubar: bool) -> usize {
+    content_top_padding_for_cell_height(metrics.cell_height, transparent_menubar)
+}
+
+fn content_top_padding_for_cell_height(cell_height: usize, transparent_menubar: bool) -> usize {
+    if transparent_menubar {
+        PADDING + cell_height
+    } else {
+        PADDING
+    }
+}
+
+fn layout_metrics(
+    width: usize,
+    height: usize,
+    metrics: &CellMetrics,
+    transparent_menubar: bool,
+) -> LayoutMetrics {
+    let top_padding = content_top_padding(metrics, transparent_menubar);
+    let cols = width.saturating_sub(PADDING * 2) / metrics.cell_width.max(1);
+    let rows = layout_rows(height, metrics.cell_height.max(1), transparent_menubar);
+    LayoutMetrics {
+        top_padding,
+        cols,
+        rows: rows.max(1),
+    }
+}
+
+fn layout_rows(height: usize, cell_height: usize, transparent_menubar: bool) -> usize {
+    let top_padding = content_top_padding_for_cell_height(cell_height, transparent_menubar);
+    height.saturating_sub(top_padding + PADDING) / cell_height.max(1)
 }
 
 fn mouse_button_to_kak(button: MouseButton) -> Option<MouseButtonName> {
@@ -1532,5 +1690,18 @@ mod tests {
         assert_eq!(config.font_family, "SF Mono");
         assert_eq!(config.font_size, 15.0);
         assert!(config.transparent_menubar);
+    }
+
+    #[test]
+    fn transparent_menubar_adds_one_extra_top_row_of_padding() {
+        assert_eq!(content_top_padding_for_cell_height(18, false), PADDING);
+        assert_eq!(content_top_padding_for_cell_height(18, true), PADDING + 18);
+    }
+
+    #[test]
+    fn transparent_menubar_reduces_available_rows_by_one() {
+        let height = PADDING * 2 + 10 * 18;
+        assert_eq!(layout_rows(height, 18, false), 10);
+        assert_eq!(layout_rows(height, 18, true), 9);
     }
 }
