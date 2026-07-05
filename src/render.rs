@@ -806,11 +806,11 @@ fn modal_background_info(info: &InfoState) -> InfoState {
     }
 
     InfoState {
-        title: line_with_background(&info.title, &info.face.bg),
+        title: line_with_face(&info.title, &info.face),
         content: info
             .content
             .iter()
-            .map(|line| line_with_background(line, &info.face.bg))
+            .map(|line| line_with_face(line, &info.face))
             .collect(),
         anchor: info.anchor,
         face: info.face.clone(),
@@ -1172,12 +1172,14 @@ fn truncate_atoms(line: &[Atom], max_width: usize) -> Vec<Atom> {
     result
 }
 
-fn line_with_background(line: &[Atom], bg: &str) -> Vec<Atom> {
+fn line_with_face(line: &[Atom], face: &Face) -> Vec<Atom> {
     line.iter()
         .map(|atom| Atom {
             face: Face {
-                bg: bg.to_string(),
-                ..atom.face.clone()
+                fg: face.fg.clone(),
+                bg: face.bg.clone(),
+                underline: atom.face.underline.clone(),
+                attributes: atom.face.attributes.clone(),
             },
             contents: atom.contents.clone(),
         })
@@ -1549,9 +1551,9 @@ mod tests {
         let rendered = modal_background_info(&info);
         assert_eq!(rendered.face.bg, "green");
         assert_eq!(rendered.title[0].face.bg, "green");
-        assert_eq!(rendered.title[0].face.fg, "white");
+        assert_eq!(rendered.title[0].face.fg, "default");
         assert_eq!(rendered.content[0][0].face.bg, "green");
-        assert_eq!(rendered.content[0][0].face.fg, "black");
+        assert_eq!(rendered.content[0][0].face.fg, "default");
     }
 
     #[test]
@@ -1588,6 +1590,31 @@ mod tests {
         let rendered = modal_background_info(&info);
         assert_eq!(rendered.title[0].face.bg, "red");
         assert_eq!(rendered.content[0][0].face.bg, "blue");
+    }
+
+    #[test]
+    fn line_with_face_uses_top_level_colors_and_keeps_text_attributes() {
+        let line = vec![Atom {
+            face: Face {
+                fg: "red".into(),
+                bg: "blue".into(),
+                underline: "underline".into(),
+                attributes: vec!["bold".into()],
+            },
+            contents: "body".into(),
+        }];
+        let face = Face {
+            fg: "white".into(),
+            bg: "gray".into(),
+            underline: "default".into(),
+            attributes: Vec::new(),
+        };
+
+        let rendered = line_with_face(&line, &face);
+        assert_eq!(rendered[0].face.fg, "white");
+        assert_eq!(rendered[0].face.bg, "gray");
+        assert_eq!(rendered[0].face.underline, "underline");
+        assert_eq!(rendered[0].face.attributes, vec!["bold"]);
     }
 
     #[test]
