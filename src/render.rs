@@ -982,8 +982,6 @@ fn render_grid_cursor(
     if let Some(ch) = cell.ch {
         draw_glyph(canvas, cursor.column, top, ch, metrics, &fg_paint);
     }
-
-    draw_cursor_outline(canvas, cursor.column, top, metrics, fg);
 }
 
 fn cursor_cell(line: Option<&[Atom]>, target_column: usize) -> Option<CursorCell> {
@@ -1171,31 +1169,6 @@ fn fill_cells(
         metrics.cell_height as f32,
     );
     canvas.draw_rect(rect, paint);
-}
-
-fn draw_cursor_outline(
-    canvas: &Canvas,
-    column: usize,
-    top: usize,
-    metrics: &CellMetrics,
-    color: Rgb,
-) {
-    let left = PADDING + column * metrics.cell_width;
-    let stroke = (metrics.cell_width.min(metrics.cell_height) / 10).max(1) as f32;
-    let rect = Rect::from_xywh(
-        left as f32 + stroke / 2.0,
-        top as f32 + stroke / 2.0,
-        metrics.cell_width as f32 - stroke,
-        metrics.cell_height as f32 - stroke,
-    );
-
-    let mut paint = Paint::default();
-    paint
-        .set_anti_alias(false)
-        .set_color(color.to_color())
-        .set_style(skia_safe::paint::Style::Stroke)
-        .set_stroke_width(stroke);
-    canvas.draw_rect(rect, &paint);
 }
 
 fn draw_glyph(
