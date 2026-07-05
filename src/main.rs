@@ -33,7 +33,10 @@ mod macos;
 mod render;
 mod user_keys;
 
-use app::{AppCommand, AppConfig, AppEvent, AppState, Args, apply_notification, load_config};
+use app::{
+    AppCommand, AppConfig, AppEvent, AppState, Args, WINDOW_TITLE_UI_OPTION, apply_notification,
+    load_config,
+};
 use diagnostics::log_error;
 use input::{
     MouseMotionState, ScrollState, key_event_to_kak, pointer_position_to_coord,
@@ -110,7 +113,7 @@ struct ClientWindow {
     surface: Surface<Rc<Window>, Rc<Window>>,
     child: Child,
     session: OsString,
-    client_id: String,
+    client_id: Option<String>,
     command_tx: Sender<String>,
     modifiers: ModifiersState,
     mouse_cell: Coord,
@@ -151,7 +154,6 @@ fn create_client_window(
     args: &Args,
     proxy: EventLoopProxy<AppEvent>,
     config: &AppConfig,
-    client_id: String,
     client_close_socket: Option<&Path>,
 ) -> Result<ClientWindow> {
     let context = SoftContext::new(window.clone()).map_err(|error| anyhow!(error.to_string()))?;
@@ -160,7 +162,7 @@ fn create_client_window(
     resize_surface(&mut surface, window.inner_size())?;
 
     let renderer = load_renderer(config);
-    let mut child = spawn_kakoune(args, proxy, window.id(), &client_id, client_close_socket)?;
+    let mut child = spawn_kakoune(args, proxy, window.id(), client_close_socket)?;
     let command_tx = spawn_stdin_writer(&mut child)?;
 
     let client = ClientWindow {
@@ -168,7 +170,7 @@ fn create_client_window(
         surface,
         child,
         session: OsString::new(),
-        client_id,
+        client_id: None,
         command_tx,
         modifiers: ModifiersState::empty(),
         mouse_cell: Coord { line: 0, column: 0 },
@@ -190,11 +192,10 @@ fn create_initial_client_window(
     proxy: EventLoopProxy<AppEvent>,
     config: &AppConfig,
     window_icon: Option<Icon>,
-    client_id: String,
     client_close_socket: Option<&Path>,
 ) -> Result<ClientWindow> {
     let window = Rc::new(event_loop.create_window(window_attributes(config, window_icon))?);
-    create_client_window(window, args, proxy, config, client_id, client_close_socket)
+    create_client_window(window, args, proxy, config, client_close_socket)
 }
 
 fn create_active_client_window(
@@ -203,11 +204,10 @@ fn create_active_client_window(
     proxy: EventLoopProxy<AppEvent>,
     config: &AppConfig,
     window_icon: Option<Icon>,
-    client_id: String,
     client_close_socket: Option<&Path>,
 ) -> Result<ClientWindow> {
     let window = Rc::new(elwt.create_window(window_attributes(config, window_icon))?);
-    create_client_window(window, args, proxy, config, client_id, client_close_socket)
+    create_client_window(window, args, proxy, config, client_close_socket)
 }
 
 fn focused_window_id(clients: &HashMap<WindowId, ClientWindow>) -> Option<WindowId> {
@@ -247,7 +247,8 @@ fn remove_closed_client(
     elwt: &ActiveEventLoop,
 ) {
     let window_id = clients.iter().find_map(|(window_id, client)| {
-        (client.session == session && client.client_id == client_id).then_some(*window_id)
+        (client.session == session && client.client_id.as_deref() == Some(client_id))
+            .then_some(*window_id)
     });
     if let Some(window_id) = window_id {
         clients.remove(&window_id);
@@ -257,10 +258,15 @@ fn remove_closed_client(
     }
 }
 
-fn next_client_id(next_client_number: &mut u64) -> String {
-    let client_id = format!("kakvide-{}-{next_client_number}", std::process::id());
-    *next_client_number += 1;
-    client_id
+fn client_name_from_ui_options(
+    options: &serde_json::Map<String, serde_json::Value>,
+) -> Option<String> {
+    options
+        .get(WINDOW_TITLE_UI_OPTION)
+        .and_then(serde_json::Value::as_str)
+        .and_then(|title| title.rsplit_once(" - ").map(|(_, client)| client.trim()))
+        .filter(|client| !client.is_empty())
+        .map(str::to_string)
 }
 
 fn adjust_client_font_size(client: &mut ClientWindow, action: FontSizeAction, config: &AppConfig) {
@@ -283,7 +289,6 @@ struct RuntimeContext<'a> {
     window_icon: Option<Icon>,
     kak_bin: &'a str,
     kakoune_session: &'a OsStr,
-    next_client_number: &'a mut u64,
     client_close_socket: Option<&'a Path>,
 }
 
@@ -296,7 +301,6 @@ impl RuntimeContext<'_> {
             self.proxy.clone(),
             self.config,
             self.window_icon.clone(),
-            next_client_id(self.next_client_number),
             self.client_close_socket,
         ) {
             Ok(client) => {
@@ -430,14 +434,12 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
     #[cfg(not(unix))]
     let client_close_socket: Option<PathBuf> = None;
 
-    let mut next_client_number = 0;
     let mut initial_client = create_initial_client_window(
         &event_loop,
         &args,
         proxy.clone(),
         &config,
         window_icon.clone(),
-        next_client_id(&mut next_client_number),
         client_close_socket.as_deref(),
     )?;
     let kakoune_session = resolve_kakoune_session(&args.kak_args, initial_client.child.id());
@@ -472,6 +474,11 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                         matches!(notification.as_ref(), KakouneNotification::Draw { .. })
                             && !client.did_force_startup_resize;
                     let old_window_title = client.state.window_title.clone();
+                    if client.client_id.is_none()
+                        && let KakouneNotification::SetUiOptions { options } = notification.as_ref()
+                    {
+                        client.client_id = client_name_from_ui_options(options);
+                    }
                     apply_notification(&mut client.state, *notification);
                     if client.state.window_title != old_window_title {
                         client
@@ -503,7 +510,6 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     window_icon: window_icon.clone(),
                     kak_bin: &kak_bin,
                     kakoune_session: &kakoune_session,
-                    next_client_number: &mut next_client_number,
                     client_close_socket: client_close_socket.as_deref(),
                 }
                 .open_session_window(&kakoune_session, &paths, "open file");
@@ -517,7 +523,6 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     window_icon: window_icon.clone(),
                     kak_bin: &kak_bin,
                     kakoune_session: &kakoune_session,
-                    next_client_number: &mut next_client_number,
                     client_close_socket: client_close_socket.as_deref(),
                 }
                 .handle_command(command, None);
@@ -636,7 +641,6 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                         window_icon: window_icon.clone(),
                         kak_bin: &kak_bin,
                         kakoune_session: &kakoune_session,
-                        next_client_number: &mut next_client_number,
                         client_close_socket: client_close_socket.as_deref(),
                     }
                     .handle_command(command, Some(window_id));
@@ -748,8 +752,8 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        connected_kakoune_args, default_launch_directory, extract_kak_bin, resolve_kakoune_session,
-        should_show_combined_help,
+        client_name_from_ui_options, connected_kakoune_args, default_launch_directory,
+        extract_kak_bin, resolve_kakoune_session, should_show_combined_help,
     };
 
     #[test]
@@ -813,6 +817,20 @@ mod tests {
     #[test]
     fn launch_directory_ignores_missing_home() {
         assert_eq!(default_launch_directory(Path::new("/"), None), None);
+    }
+
+    #[test]
+    fn client_name_is_read_from_kakvide_title_ui_option() {
+        let mut options = serde_json::Map::new();
+        options.insert(
+            crate::app::WINDOW_TITLE_UI_OPTION.to_string(),
+            serde_json::Value::String("/tmp/project - client0".to_string()),
+        );
+
+        assert_eq!(
+            client_name_from_ui_options(&options),
+            Some("client0".to_string())
+        );
     }
 
     #[test]
