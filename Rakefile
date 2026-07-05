@@ -24,7 +24,7 @@ end
 
 task :icon do
   source = "assets/kakvide.png"
-  output = "assets/kakvide.icns"
+  output = ENV.fetch("ICON_OUTPUT", "target/generated/kakvide.icns")
   magick = `command -v magick`.strip
 
   abort "ImageMagick is required to build icons (`brew install imagemagick`)." if magick.empty?
@@ -33,18 +33,18 @@ task :icon do
     iconset = File.join(dir, "kakvide.iconset")
     FileUtils.mkdir_p(iconset)
 
-    {
-      "icon_16x16.png" => 16,
-      "icon_16x16@2x.png" => 32,
-      "icon_32x32.png" => 32,
-      "icon_32x32@2x.png" => 64,
-      "icon_128x128.png" => 128,
-      "icon_128x128@2x.png" => 256,
-      "icon_256x256.png" => 256,
-      "icon_256x256@2x.png" => 512,
-      "icon_512x512.png" => 512,
-      "icon_512x512@2x.png" => 1024,
-    }.each do |name, size|
+    icons = [
+      ["icp4", "icon_16x16.png", 16],
+      ["icp5", "icon_32x32.png", 32],
+      ["icp6", "icon_32x32@2x.png", 64],
+      ["ic07", "icon_128x128.png", 128],
+      ["ic08", "icon_256x256.png", 256],
+      ["ic09", "icon_512x512.png", 512],
+      ["ic10", "icon_512x512@2x.png", 1024],
+    ]
+
+    chunks = icons.map do |icon_type, name, size|
+      path = File.join(iconset, name)
       sharpness = size <= 32 ? "0x0.75+1.8+0.01" : "0x0.55+1.1+0.01"
       sh [
         magick.shellescape,
@@ -53,10 +53,24 @@ task :icon do
         "-define filter:blur=0.70",
         "-resize #{size}x#{size}",
         "-unsharp #{sharpness}",
-        File.join(iconset, name).shellescape,
+        "-strip",
+        "-define png:exclude-chunk=all",
+        path.shellescape,
       ].join(" ")
+
+      png = File.binread(path)
+      icon_type + [png.bytesize + 8].pack("N") + png
     end
 
-    sh "iconutil --convert icns --output #{output} #{iconset}"
+    generated = File.join(dir, "kakvide.icns")
+    body = chunks.join
+    File.binwrite(generated, "icns" + [body.bytesize + 8].pack("N") + body)
+
+    if File.exist?(output) && FileUtils.compare_file(generated, output)
+      puts "#{output} is up to date"
+    else
+      FileUtils.mkdir_p(File.dirname(output))
+      FileUtils.cp(generated, output)
+    end
   end
 end

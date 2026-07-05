@@ -6,7 +6,7 @@ edition = "2024"
 [package.metadata.bundle]
 name = "Kakvide"
 identifier = "sh.axk.kakvide"
-icon = ["assets/kakvide.icns"]
+icon = ["target/generated/kakvide.icns"]
 version = "0.1.0"
 resources = []
 category = "Developer Tool"
