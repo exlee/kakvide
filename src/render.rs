@@ -647,8 +647,8 @@ fn render_info(
     }
 
     let rect = info_rect(info, menu_rect, cols, rows, width, height);
-    fill_rect(canvas, rect, &info.face, metrics, top_padding);
     let rendered_info = modal_background_info(info);
+    fill_rect(canvas, rect, &rendered_info.face, metrics, top_padding);
 
     if framed {
         render_framed_info(canvas, &rendered_info, rect, metrics, top_padding);
@@ -1547,6 +1547,7 @@ mod tests {
         };
 
         let rendered = modal_background_info(&info);
+        assert_eq!(rendered.face.bg, "green");
         assert_eq!(rendered.title[0].face.bg, "green");
         assert_eq!(rendered.title[0].face.fg, "white");
         assert_eq!(rendered.content[0][0].face.bg, "green");
