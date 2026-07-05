@@ -30,8 +30,8 @@ mod user_keys;
 
 use app::{AppConfig, AppEvent, AppState, Args, apply_notification, load_config};
 use input::{
-    ScrollState, key_event_to_kak, pointer_position_to_coord, scroll_delta_to_kak, send_keys,
-    send_mouse_button, send_mouse_move, send_resize, send_scroll,
+    MouseMotionState, ScrollState, key_event_to_kak, pointer_position_to_coord,
+    scroll_delta_to_kak, send_keys, send_mouse_button, send_mouse_move, send_resize, send_scroll,
 };
 use kakoune_messages::{Coord, KakouneNotification};
 use kakoune_process::{build_kakoune_help_command, spawn_kakoune, spawn_stdin_writer};
@@ -137,6 +137,7 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
 
     let mut modifiers = ModifiersState::empty();
     let mut mouse_cell = Coord { line: 0, column: 0 };
+    let mut mouse_motion_state = MouseMotionState::default();
     let mut scroll_state = ScrollState::default();
     let mut did_force_startup_resize = false;
     let mut state = AppState::default();
@@ -220,16 +221,23 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     mouse_cell = pointer_position_to_coord(
                         position.x, position.y, &renderer, &window, &config,
                     );
-                    send_mouse_move(&command_tx, mouse_cell);
+                    if mouse_motion_state.should_send_move() {
+                        send_mouse_move(&command_tx, mouse_cell);
+                    }
                 }
                 WindowEvent::MouseInput { state, button, .. } => match state {
                     ElementState::Pressed => {
+                        mouse_motion_state.set_button(button, true);
                         send_mouse_button(&command_tx, true, button, mouse_cell)
                     }
                     ElementState::Released => {
-                        send_mouse_button(&command_tx, false, button, mouse_cell)
+                        send_mouse_button(&command_tx, false, button, mouse_cell);
+                        mouse_motion_state.set_button(button, false);
                     }
                 },
+                WindowEvent::CursorLeft { .. } | WindowEvent::Focused(false) => {
+                    mouse_motion_state.reset();
+                }
                 WindowEvent::MouseWheel { delta, .. } => {
                     if let Some(amount) = scroll_delta_to_kak(
                         delta,

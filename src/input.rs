@@ -15,6 +15,27 @@ pub struct ScrollState {
     pending_amount: f64,
 }
 
+#[derive(Debug, Default)]
+pub struct MouseMotionState {
+    left_button_down: bool,
+}
+
+impl MouseMotionState {
+    pub fn set_button(&mut self, button: MouseButton, pressed: bool) {
+        if button == MouseButton::Left {
+            self.left_button_down = pressed;
+        }
+    }
+
+    pub fn reset(&mut self) {
+        self.left_button_down = false;
+    }
+
+    pub fn should_send_move(&self) -> bool {
+        self.left_button_down
+    }
+}
+
 pub fn send_resize(tx: &Sender<String>, window: &Window, renderer: &Renderer, config: &AppConfig) {
     let size = window.inner_size();
     let scale_factor = window.scale_factor();
@@ -244,5 +265,43 @@ mod tests {
             scroll_delta_to_kak(MouseScrollDelta::LineDelta(0.0, 1.0), 0.5, &mut state),
             Some(-1)
         );
+    }
+
+    #[test]
+    fn mouse_motion_state_ignores_hover_moves() {
+        let state = MouseMotionState::default();
+
+        assert!(!state.should_send_move());
+    }
+
+    #[test]
+    fn mouse_motion_state_sends_moves_while_left_button_is_down() {
+        let mut state = MouseMotionState::default();
+
+        state.set_button(MouseButton::Left, true);
+        assert!(state.should_send_move());
+
+        state.set_button(MouseButton::Left, false);
+        assert!(!state.should_send_move());
+    }
+
+    #[test]
+    fn mouse_motion_state_does_not_send_moves_for_other_buttons() {
+        let mut state = MouseMotionState::default();
+
+        state.set_button(MouseButton::Right, true);
+        state.set_button(MouseButton::Middle, true);
+
+        assert!(!state.should_send_move());
+    }
+
+    #[test]
+    fn mouse_motion_state_reset_stops_drag_moves() {
+        let mut state = MouseMotionState::default();
+
+        state.set_button(MouseButton::Left, true);
+        state.reset();
+
+        assert!(!state.should_send_move());
     }
 }
