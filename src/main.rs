@@ -5,12 +5,14 @@ use std::rc::Rc;
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::thread;
 
-use ab_glyph::{Font, FontArc, Glyph, PxScale, ScaleFont, point};
 use anyhow::{Context, Result, anyhow, bail};
 use clap::Parser;
-use fontdb::{Database, Family, Query};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use skia_safe::{
+    AlphaType, Canvas, Color, ColorType, Font, FontHinting, FontMgr, FontStyle, ImageInfo, Paint,
+    PixelGeometry, Rect, SurfaceProps, SurfacePropsFlags, font::Edging, surfaces,
+};
 use softbuffer::{Context as SoftContext, Surface};
 use unicode_width::UnicodeWidthChar;
 use winit::dpi::LogicalSize;
@@ -135,11 +137,16 @@ struct AppState {
 
 #[derive(Clone)]
 struct Renderer {
-    font: FontArc,
-    font_size: PxScale,
+    font_mgr: FontMgr,
+    logical_font_size: f32,
+}
+
+#[derive(Clone)]
+struct CellMetrics {
+    font: Font,
     cell_width: usize,
     cell_height: usize,
-    ascent: f32,
+    baseline_offset: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -154,8 +161,8 @@ impl Rgb {
         Self { r, g, b }
     }
 
-    fn pack(self) -> u32 {
-        ((self.r as u32) << 16) | ((self.g as u32) << 8) | self.b as u32
+    fn to_color(self) -> Color {
+        Color::from_rgb(self.r, self.g, self.b)
     }
 }
 
@@ -171,7 +178,7 @@ fn main() -> Result<()> {
         .with_title("kakvide")
         .with_inner_size(LogicalSize::new(1200.0, 800.0));
     let window = Rc::new(event_loop.create_window(attrs)?);
-    let renderer = load_renderer()?;
+    let renderer = load_renderer();
     let context = SoftContext::new(window.clone()).map_err(|error| anyhow!(error.to_string()))?;
     let mut surface =
         Surface::new(&context, window.clone()).map_err(|error| anyhow!(error.to_string()))?;
@@ -437,6 +444,7 @@ fn render(
     let size = window.inner_size();
     let width = size.width.max(1) as usize;
     let height = size.height.max(1) as usize;
+    let metrics = renderer.metrics(window.scale_factor());
 
     surface
         .resize(
@@ -448,21 +456,51 @@ fn render(
     let mut buffer = surface
         .buffer_mut()
         .map_err(|error| anyhow!(error.to_string()))?;
-    let bg = resolve_color(&state.grid.default_face.bg, FALLBACK_BG);
-    buffer.fill(bg.pack());
+    let pixels = unsafe { buffer_as_u8_mut(buffer.as_mut()) };
 
-    let cols = width.saturating_sub(PADDING * 2) / renderer.cell_width;
-    let rows = height.saturating_sub(PADDING * 2) / renderer.cell_height;
+    let image_info = ImageInfo::new(
+        (width as i32, height as i32),
+        ColorType::BGRA8888,
+        AlphaType::Premul,
+        None,
+    );
+    let props = SurfaceProps::new(
+        SurfacePropsFlags::USE_DEVICE_INDEPENDENT_FONTS,
+        PixelGeometry::Unknown,
+    );
+    let mut skia_surface = surfaces::wrap_pixels(&image_info, pixels, width * 4, Some(&props))
+        .context("failed to wrap Skia surface around window buffer")?;
+    let canvas = skia_surface.canvas();
+
+    render_canvas(canvas, width, height, state, &metrics);
+
+    buffer
+        .present()
+        .map_err(|error| anyhow!(error.to_string()))?;
+    Ok(())
+}
+
+fn render_canvas(
+    canvas: &Canvas,
+    width: usize,
+    height: usize,
+    state: &AppState,
+    metrics: &CellMetrics,
+) {
+    let bg = resolve_color(&state.grid.default_face.bg, FALLBACK_BG).to_color();
+    canvas.clear(bg);
+
+    let cols = width.saturating_sub(PADDING * 2) / metrics.cell_width.max(1);
+    let rows = height.saturating_sub(PADDING * 2) / metrics.cell_height.max(1);
 
     for (row_index, line) in state.grid.lines.iter().take(rows).enumerate() {
         render_line(
-            &mut buffer,
-            width,
+            canvas,
             row_index,
             line,
             &state.grid.default_face,
             cols,
-            renderer,
+            metrics,
         );
     }
 
@@ -471,74 +509,50 @@ fn render(
         let mut line = status.prompt.clone();
         line.extend(status.content.clone());
         render_line(
-            &mut buffer,
-            width,
+            canvas,
             status_row,
             &line,
             &status.default_face,
             cols,
-            renderer,
+            metrics,
         );
     }
 
     render_cursor(
-        &mut buffer,
-        width,
-        height,
+        canvas,
         state.grid.cursor_pos,
         &state.grid.default_face,
-        renderer,
+        metrics,
     );
-
-    buffer
-        .present()
-        .map_err(|error| anyhow!(error.to_string()))?;
-    Ok(())
 }
 
 fn render_line(
-    buffer: &mut [u32],
-    surface_width: usize,
+    canvas: &Canvas,
     row: usize,
     line: &[Atom],
     default_face: &Face,
     max_columns: usize,
-    renderer: &Renderer,
+    metrics: &CellMetrics,
 ) {
-    let top = PADDING + row * renderer.cell_height;
+    let top = PADDING + row * metrics.cell_height;
     let mut column = 0usize;
 
     for atom in line {
-        let _ = (&atom.face.underline, &atom.face.attributes);
         let fg = resolve_face_color(&atom.face.fg, &default_face.fg, FALLBACK_FG);
         let bg = resolve_face_color(&atom.face.bg, &default_face.bg, FALLBACK_BG);
+        let _ = (&atom.face.underline, &atom.face.attributes);
 
         for ch in atom.contents.chars() {
             if ch == '\n' {
                 continue;
             }
-            let cell_span = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
-            for offset in 0..cell_span {
-                fill_rect(
-                    buffer,
-                    surface_width,
-                    PADDING + (column + offset) * renderer.cell_width,
-                    top,
-                    renderer.cell_width,
-                    renderer.cell_height,
-                    bg.pack(),
-                );
+
+            let span = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            for offset in 0..span {
+                fill_cell(canvas, column + offset, top, metrics, bg);
             }
-            draw_char(
-                buffer,
-                surface_width,
-                PADDING + column * renderer.cell_width,
-                top,
-                ch,
-                fg.pack(),
-                renderer,
-            );
-            column += cell_span;
+            draw_glyph(canvas, column, top, ch, metrics, fg);
+            column += span;
             if column >= max_columns {
                 return;
             }
@@ -546,97 +560,63 @@ fn render_line(
     }
 }
 
-fn render_cursor(
-    buffer: &mut [u32],
-    surface_width: usize,
-    surface_height: usize,
-    cursor_pos: Coord,
-    default_face: &Face,
-    renderer: &Renderer,
-) {
-    let cursor_x = PADDING + cursor_pos.column * renderer.cell_width;
-    let cursor_y = PADDING + cursor_pos.line * renderer.cell_height;
-    if cursor_x + renderer.cell_width > surface_width
-        || cursor_y + renderer.cell_height > surface_height
-    {
-        return;
-    }
-
-    let color = resolve_face_color(&default_face.fg, &default_face.fg, FALLBACK_FG).pack();
-    fill_rect(
-        buffer,
-        surface_width,
-        cursor_x,
-        cursor_y + renderer.cell_height.saturating_sub(2),
-        renderer.cell_width,
-        2,
-        color,
+fn fill_cell(canvas: &Canvas, column: usize, top: usize, metrics: &CellMetrics, bg: Rgb) {
+    let left = PADDING + column * metrics.cell_width;
+    let rect = Rect::from_xywh(
+        left as f32,
+        top as f32,
+        metrics.cell_width as f32,
+        metrics.cell_height as f32,
     );
+    let mut paint = Paint::default();
+    paint.set_anti_alias(false).set_color(bg.to_color());
+    canvas.draw_rect(rect, &paint);
 }
 
-fn draw_char(
-    buffer: &mut [u32],
-    surface_width: usize,
-    x: usize,
-    y: usize,
+fn draw_glyph(
+    canvas: &Canvas,
+    column: usize,
+    top: usize,
     ch: char,
-    fg: u32,
-    renderer: &Renderer,
+    metrics: &CellMetrics,
+    fg: Rgb,
 ) {
     if ch.is_control() {
         return;
     }
 
-    let glyph = Glyph {
-        id: renderer.font.glyph_id(ch),
-        scale: renderer.font_size,
-        position: point(x as f32, y as f32 + renderer.ascent),
-    };
-
-    let Some(outlined) = renderer.font.outline_glyph(glyph) else {
-        return;
-    };
-
-    outlined.draw(|gx, gy, coverage| {
-        if coverage < 0.2 {
-            return;
-        }
-        let px = x + gx as usize;
-        let py = y + gy as usize;
-        set_pixel(buffer, surface_width, px, py, blend(fg, coverage));
-    });
+    let left = PADDING + column * metrics.cell_width;
+    let baseline = top as f32 + metrics.baseline_offset;
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true).set_color(fg.to_color());
+    canvas.draw_str(
+        ch.to_string(),
+        (left as f32, baseline),
+        &metrics.font,
+        &paint,
+    );
 }
 
-fn fill_rect(
-    buffer: &mut [u32],
-    surface_width: usize,
-    x: usize,
-    y: usize,
-    width: usize,
-    height: usize,
-    color: u32,
-) {
-    for row in y..y.saturating_add(height) {
-        let start = row.saturating_mul(surface_width).saturating_add(x);
-        let end = start.saturating_add(width).min(buffer.len());
-        if start >= buffer.len() || start >= end {
-            continue;
-        }
-        buffer[start..end].fill(color);
-    }
-}
-
-fn set_pixel(buffer: &mut [u32], surface_width: usize, x: usize, y: usize, color: u32) {
-    let index = y.saturating_mul(surface_width).saturating_add(x);
-    if index < buffer.len() {
-        buffer[index] = color;
-    }
+fn render_cursor(canvas: &Canvas, cursor_pos: Coord, default_face: &Face, metrics: &CellMetrics) {
+    let cursor_x = PADDING + cursor_pos.column * metrics.cell_width;
+    let cursor_y = PADDING + cursor_pos.line * metrics.cell_height;
+    let color = resolve_face_color(&default_face.fg, &default_face.fg, FALLBACK_FG).to_color();
+    let rect = Rect::from_xywh(
+        cursor_x as f32,
+        (cursor_y + metrics.cell_height.saturating_sub(2)) as f32,
+        metrics.cell_width as f32,
+        2.0,
+    );
+    let mut paint = Paint::default();
+    paint.set_anti_alias(false).set_color(color);
+    canvas.draw_rect(rect, &paint);
 }
 
 fn send_resize(tx: &Sender<String>, window: &Window, renderer: &Renderer) {
     let size = window.inner_size();
-    let cols = ((size.width as usize).saturating_sub(PADDING * 2) / renderer.cell_width).max(1);
-    let rows = ((size.height as usize).saturating_sub(PADDING * 2) / renderer.cell_height).max(1);
+    let metrics = renderer.metrics(window.scale_factor());
+    let cols = ((size.width as usize).saturating_sub(PADDING * 2) / metrics.cell_width).max(1);
+    let rows = ((size.height as usize).saturating_sub(PADDING * 2) / metrics.cell_height).max(1);
     send_rpc(tx, "resize", json!([rows, cols]));
 }
 
@@ -749,7 +729,6 @@ fn resolve_color(color: &str, fallback: Rgb) -> Rgb {
         "blue" => Rgb::new(0x62, 0xd6, 0xe8),
         "magenta" => Rgb::new(0xff, 0x79, 0xc6),
         "cyan" => Rgb::new(0x8b, 0xe9, 0xfd),
-        "default" => fallback,
         _ => fallback,
     }
 }
@@ -766,41 +745,62 @@ fn parse_hex_color(value: &str) -> Option<Rgb> {
     Some(Rgb::new(r, g, b))
 }
 
-fn blend(color: u32, coverage: f32) -> u32 {
-    let coverage = coverage.clamp(0.0, 1.0);
-    let r = (((color >> 16) & 0xff) as f32 * coverage).round() as u32;
-    let g = (((color >> 8) & 0xff) as f32 * coverage).round() as u32;
-    let b = ((color & 0xff) as f32 * coverage).round() as u32;
-    (r << 16) | (g << 8) | b
+fn load_renderer() -> Renderer {
+    Renderer {
+        font_mgr: FontMgr::new(),
+        logical_font_size: 15.0,
+    }
 }
 
-fn load_renderer() -> Result<Renderer> {
-    let mut db = Database::new();
-    db.load_system_fonts();
-    let id = db
-        .query(&Query {
-            families: &[Family::Monospace],
-            ..Query::default()
-        })
-        .context("could not find a monospace system font")?;
+impl Renderer {
+    fn metrics(&self, scale_factor: f64) -> CellMetrics {
+        let physical_font_size = (self.logical_font_size as f64 * scale_factor) as f32;
+        let typeface = preferred_typeface(&self.font_mgr).unwrap_or_else(|| {
+            self.font_mgr
+                .match_family_style("", FontStyle::normal())
+                .expect("expected a fallback system typeface")
+        });
 
-    let font = db
-        .with_face_data(id, |data, _| FontArc::try_from_vec(data.to_vec()))
-        .context("could not load font bytes")??;
+        let mut font = Font::new(typeface, physical_font_size);
+        font.set_subpixel(true)
+            .set_edging(Edging::SubpixelAntiAlias)
+            .set_hinting(FontHinting::Full)
+            .set_baseline_snap(false)
+            .set_linear_metrics(false);
 
-    let font_size = PxScale::from(40.0);
-    let scaled = font.as_scaled(font_size);
-    let cell_width = scaled.h_advance(font.glyph_id('M')).ceil().max(1.0) as usize;
-    let ascent = scaled.ascent().ceil();
-    let descent = scaled.descent().abs().ceil() as usize;
-    let line_gap = scaled.line_gap().ceil().max(0.0) as usize;
-    let cell_height = ascent.max(1.0) as usize + descent + line_gap;
+        let (_, metrics) = font.metrics();
+        let cell_width = font.measure_str("M", None).0.ceil().max(1.0) as usize;
+        let cell_height = (metrics.descent - metrics.ascent + metrics.leading)
+            .ceil()
+            .max(1.0) as usize;
+        let baseline_offset = (-metrics.ascent).ceil();
 
-    Ok(Renderer {
-        font,
-        font_size,
-        cell_width,
-        cell_height: cell_height.max(16),
-        ascent,
-    })
+        CellMetrics {
+            font,
+            cell_width,
+            cell_height: cell_height.max(16),
+            baseline_offset,
+        }
+    }
+}
+
+fn preferred_typeface(font_mgr: &FontMgr) -> Option<skia_safe::Typeface> {
+    [
+        "SF Mono",
+        "Menlo",
+        "Monaco",
+        "JetBrains Mono",
+        "Courier New",
+    ]
+    .iter()
+    .find_map(|family| font_mgr.match_family_style(family, FontStyle::normal()))
+}
+
+unsafe fn buffer_as_u8_mut(buffer: &mut [u32]) -> &mut [u8] {
+    unsafe {
+        std::slice::from_raw_parts_mut(
+            buffer.as_mut_ptr() as *mut u8,
+            std::mem::size_of_val(buffer),
+        )
+    }
 }
