@@ -18,7 +18,9 @@ use skia_safe::{
 use softbuffer::{Context as SoftContext, Surface};
 use unicode_width::UnicodeWidthChar;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
+use winit::event::{
+    ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent,
+};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 #[cfg(target_os = "macos")]
@@ -109,10 +111,24 @@ enum RpcNotification {
     SetUiOptions {
         options: serde_json::Map<String, Value>,
     },
-    MenuShow,
-    MenuSelect,
+    MenuShow {
+        items: Vec<Vec<Atom>>,
+        anchor: Coord,
+        selected_face: Face,
+        menu_face: Face,
+        style: String,
+    },
+    MenuSelect {
+        selected: isize,
+    },
     MenuHide,
-    InfoShow,
+    InfoShow {
+        title: Vec<Atom>,
+        content: Vec<Vec<Atom>>,
+        anchor: Coord,
+        face: Face,
+        style: String,
+    },
     InfoHide,
 }
 
@@ -153,10 +169,31 @@ struct StatusState {
     style: String,
 }
 
+#[derive(Debug, Clone)]
+struct MenuState {
+    items: Vec<Vec<Atom>>,
+    anchor: Coord,
+    selected: Option<usize>,
+    selected_face: Face,
+    menu_face: Face,
+    style: String,
+}
+
+#[derive(Debug, Clone)]
+struct InfoState {
+    title: Vec<Atom>,
+    content: Vec<Vec<Atom>>,
+    anchor: Coord,
+    face: Face,
+    style: String,
+}
+
 #[derive(Debug, Clone, Default)]
 struct AppState {
     grid: GridState,
     status: Option<StatusState>,
+    menu: Option<MenuState>,
+    info: Option<InfoState>,
 }
 
 #[derive(Clone)]
@@ -199,8 +236,9 @@ fn default_color() -> String {
 fn load_config() -> Result<AppConfig> {
     let path = "kakvide.toml";
     match fs::read_to_string(path) {
-        Ok(contents) => toml::from_str(&contents)
-            .with_context(|| format!("failed to parse {path}")),
+        Ok(contents) => {
+            toml::from_str(&contents).with_context(|| format!("failed to parse {path}"))
+        }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(AppConfig::default()),
         Err(error) => Err(error).with_context(|| format!("failed to read {path}")),
     }
@@ -267,8 +305,8 @@ fn main() -> Result<()> {
                 window.request_redraw();
             }
             Event::UserEvent(AppEvent::Rpc(notification)) => {
-                let should_force_resize =
-                    matches!(notification, RpcNotification::Draw { .. }) && !did_force_startup_resize;
+                let should_force_resize = matches!(notification, RpcNotification::Draw { .. })
+                    && !did_force_startup_resize;
                 apply_notification(&mut state, notification);
                 if should_force_resize {
                     send_resize(&command_tx, &window, &renderer);
@@ -318,17 +356,18 @@ fn main() -> Result<()> {
                     }
                 }
                 WindowEvent::CursorMoved { position, .. } => {
-                    mouse_cell = pointer_position_to_coord(position.x, position.y, &renderer, &window);
+                    mouse_cell =
+                        pointer_position_to_coord(position.x, position.y, &renderer, &window);
                     send_mouse_move(&command_tx, mouse_cell);
                 }
-                WindowEvent::MouseInput { state, button, .. } => {
-                    match state {
-                        ElementState::Pressed => send_mouse_button(&command_tx, "mouse_press", button, mouse_cell),
-                        ElementState::Released => {
-                            send_mouse_button(&command_tx, "mouse_release", button, mouse_cell)
-                        }
+                WindowEvent::MouseInput { state, button, .. } => match state {
+                    ElementState::Pressed => {
+                        send_mouse_button(&command_tx, "mouse_press", button, mouse_cell)
                     }
-                }
+                    ElementState::Released => {
+                        send_mouse_button(&command_tx, "mouse_release", button, mouse_cell)
+                    }
+                },
                 WindowEvent::MouseWheel { delta, .. } => {
                     if let Some(amount) = scroll_delta_to_kak(delta) {
                         send_scroll(&command_tx, amount, mouse_cell);
@@ -467,10 +506,43 @@ fn parse_notification(line: &str) -> Result<RpcNotification> {
                 deserialize_params(envelope.params)?;
             Ok(RpcNotification::SetUiOptions { options })
         }
-        "menu_show" => Ok(RpcNotification::MenuShow),
-        "menu_select" => Ok(RpcNotification::MenuSelect),
+        "menu_show" => {
+            let (items, anchor, selected_face, menu_face, style): (
+                Vec<Vec<Atom>>,
+                Coord,
+                Face,
+                Face,
+                String,
+            ) = deserialize_params(envelope.params)?;
+            Ok(RpcNotification::MenuShow {
+                items,
+                anchor,
+                selected_face,
+                menu_face,
+                style,
+            })
+        }
+        "menu_select" => {
+            let (selected,): (isize,) = deserialize_params(envelope.params)?;
+            Ok(RpcNotification::MenuSelect { selected })
+        }
         "menu_hide" => Ok(RpcNotification::MenuHide),
-        "info_show" => Ok(RpcNotification::InfoShow),
+        "info_show" => {
+            let (title, content, anchor, face, style): (
+                Vec<Atom>,
+                Vec<Vec<Atom>>,
+                Coord,
+                Face,
+                String,
+            ) = deserialize_params(envelope.params)?;
+            Ok(RpcNotification::InfoShow {
+                title,
+                content,
+                anchor,
+                face,
+                style,
+            })
+        }
         "info_hide" => Ok(RpcNotification::InfoHide),
         other => bail!("unsupported rpc method {other}"),
     }
@@ -523,11 +595,48 @@ fn apply_notification(state: &mut AppState, notification: RpcNotification) {
         RpcNotification::SetUiOptions { options } => {
             let _ = options;
         }
-        RpcNotification::MenuShow
-        | RpcNotification::MenuSelect
-        | RpcNotification::MenuHide
-        | RpcNotification::InfoShow
-        | RpcNotification::InfoHide => {}
+        RpcNotification::MenuShow {
+            items,
+            anchor,
+            selected_face,
+            menu_face,
+            style,
+        } => {
+            state.menu = Some(MenuState {
+                items,
+                anchor,
+                selected: None,
+                selected_face,
+                menu_face,
+                style,
+            });
+        }
+        RpcNotification::MenuSelect { selected } => {
+            if let Some(menu) = state.menu.as_mut() {
+                menu.selected = usize::try_from(selected).ok();
+            }
+        }
+        RpcNotification::MenuHide => {
+            state.menu = None;
+        }
+        RpcNotification::InfoShow {
+            title,
+            content,
+            anchor,
+            face,
+            style,
+        } => {
+            state.info = Some(InfoState {
+                title,
+                content,
+                anchor,
+                face,
+                style,
+            });
+        }
+        RpcNotification::InfoHide => {
+            state.info = None;
+        }
     }
 }
 
@@ -582,9 +691,9 @@ fn render_canvas(
     let cols = width.saturating_sub(PADDING * 2) / metrics.cell_width.max(1);
     let rows = height.saturating_sub(PADDING * 2) / metrics.cell_height.max(1);
     let status_rows = usize::from(state.status.is_some());
-    let grid_rows = rows.saturating_sub(status_rows);
+    let content_rows = rows.saturating_sub(status_rows);
 
-    for (row_index, line) in state.grid.lines.iter().take(grid_rows).enumerate() {
+    for (row_index, line) in state.grid.lines.iter().take(content_rows).enumerate() {
         render_line(
             canvas,
             row_index,
@@ -599,6 +708,14 @@ fn render_canvas(
         render_status(canvas, rows, cols, status, metrics);
     }
 
+    let menu_rect = state
+        .menu
+        .as_ref()
+        .and_then(|menu| render_menu(canvas, menu, cols, content_rows, metrics));
+
+    if let Some(info) = &state.info {
+        render_info(canvas, info, menu_rect, cols, content_rows, metrics);
+    }
 }
 
 fn render_status(
@@ -616,7 +733,11 @@ fn render_status(
 
     let mode_width = line_display_width(&status.mode_line);
     let right_start = cols.saturating_sub(mode_width);
-    let prompt_limit = if prompt_line.is_empty() { cols } else { right_start };
+    let prompt_limit = if prompt_line.is_empty() {
+        cols
+    } else {
+        right_start
+    };
 
     if !prompt_line.is_empty() {
         render_line_at(
@@ -640,6 +761,302 @@ fn render_status(
             cols,
             metrics,
         );
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CellRect {
+    row: usize,
+    column: usize,
+    width: usize,
+    height: usize,
+}
+
+fn render_menu(
+    canvas: &Canvas,
+    menu: &MenuState,
+    cols: usize,
+    rows: usize,
+    metrics: &CellMetrics,
+) -> Option<CellRect> {
+    if cols == 0 || rows == 0 || menu.items.is_empty() {
+        return None;
+    }
+
+    let width = menu
+        .items
+        .iter()
+        .map(|line| line_display_width(line))
+        .max()
+        .unwrap_or(1)
+        .max(1)
+        .saturating_add(1)
+        .min(cols);
+    let height = menu.items.len().max(1).min(rows);
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    let row = match menu.style.as_str() {
+        "inline" => inline_popup_row(menu.anchor.line, height, rows),
+        "prompt" | "search" => rows.saturating_sub(height),
+        _ => rows.saturating_sub(height),
+    };
+    let column = match menu.style.as_str() {
+        "inline" => menu.anchor.column.min(cols.saturating_sub(width)),
+        "search" => cols.saturating_sub(width),
+        _ => 0,
+    };
+
+    let rect = CellRect {
+        row,
+        column,
+        width,
+        height,
+    };
+    fill_rect(canvas, rect, &menu.menu_face, metrics);
+
+    for (index, item) in menu.items.iter().take(height).enumerate() {
+        let face = if menu.selected == Some(index) {
+            &menu.selected_face
+        } else {
+            &menu.menu_face
+        };
+        fill_line_segment(
+            canvas,
+            rect.row + index,
+            rect.column,
+            rect.width,
+            face,
+            metrics,
+        );
+        render_line_at(
+            canvas,
+            rect.row + index,
+            rect.column,
+            item,
+            face,
+            rect.column + rect.width,
+            metrics,
+        );
+    }
+
+    Some(rect)
+}
+
+fn render_info(
+    canvas: &Canvas,
+    info: &InfoState,
+    menu_rect: Option<CellRect>,
+    cols: usize,
+    rows: usize,
+    metrics: &CellMetrics,
+) {
+    if cols == 0 || rows == 0 {
+        return;
+    }
+
+    let framed = matches!(info.style.as_str(), "prompt" | "modal");
+    let title_width = line_display_width(&info.title);
+    let content_width = info
+        .content
+        .iter()
+        .map(|line| line_display_width(line))
+        .max()
+        .unwrap_or(0);
+    let inner_width = title_width.max(content_width).max(1);
+    let width = (inner_width + if framed { 4 } else { 0 }).min(cols);
+    let content_height = info.content.len().max(1);
+    let height = (content_height + if framed { 2 } else { 0 }).min(rows);
+    if width == 0 || height == 0 {
+        return;
+    }
+
+    let rect = info_rect(info, menu_rect, cols, rows, width, height);
+    fill_rect(canvas, rect, &info.face, metrics);
+
+    if framed {
+        render_framed_info(canvas, info, rect, metrics);
+    } else {
+        for (index, line) in info.content.iter().take(rect.height).enumerate() {
+            render_line_at(
+                canvas,
+                rect.row + index,
+                rect.column,
+                line,
+                &info.face,
+                rect.column + rect.width,
+                metrics,
+            );
+        }
+    }
+}
+
+fn render_framed_info(canvas: &Canvas, info: &InfoState, rect: CellRect, metrics: &CellMetrics) {
+    if rect.width < 2 || rect.height < 2 {
+        return;
+    }
+
+    let inner_width = rect.width.saturating_sub(4);
+    let mut top = String::from("╭─");
+    if info.title.is_empty() || inner_width < 2 {
+        top.push_str(&"─".repeat(inner_width));
+    } else {
+        let title = truncate_atoms(&info.title, inner_width.saturating_sub(2));
+        let title_width = line_display_width(&title);
+        let dash_width = inner_width.saturating_sub(title_width + 2);
+        top.push_str(&"─".repeat(dash_width / 2));
+        top.push('┤');
+        render_string_line(canvas, rect.row, rect.column, &top, &info.face, metrics);
+        render_line_at(
+            canvas,
+            rect.row,
+            rect.column + top.chars().count(),
+            &title,
+            &info.face,
+            rect.column + rect.width,
+            metrics,
+        );
+        let mut right = String::from("├");
+        right.push_str(&"─".repeat(dash_width - dash_width / 2));
+        right.push_str("─╮");
+        render_string_line(
+            canvas,
+            rect.row,
+            rect.column + rect.width.saturating_sub(right.chars().count()),
+            &right,
+            &info.face,
+            metrics,
+        );
+        return render_framed_info_body(canvas, info, rect, metrics);
+    }
+    top.push_str("─╮");
+    render_string_line(canvas, rect.row, rect.column, &top, &info.face, metrics);
+    render_framed_info_body(canvas, info, rect, metrics);
+}
+
+fn render_framed_info_body(
+    canvas: &Canvas,
+    info: &InfoState,
+    rect: CellRect,
+    metrics: &CellMetrics,
+) {
+    let inner_width = rect.width.saturating_sub(4);
+    let body_rows = rect.height.saturating_sub(2);
+    for row_offset in 0..body_rows {
+        let row = rect.row + 1 + row_offset;
+        if let Some(line) = info.content.get(row_offset) {
+            render_string_line(canvas, row, rect.column, "│ ", &info.face, metrics);
+            render_line_at(
+                canvas,
+                row,
+                rect.column + 2,
+                line,
+                &info.face,
+                rect.column + 2 + inner_width,
+                metrics,
+            );
+            render_string_line(
+                canvas,
+                row,
+                rect.column + rect.width.saturating_sub(2),
+                " │",
+                &info.face,
+                metrics,
+            );
+        } else {
+            render_string_line(
+                canvas,
+                row,
+                rect.column,
+                &format!("│ {} │", " ".repeat(inner_width)),
+                &info.face,
+                metrics,
+            );
+        }
+    }
+
+    let bottom = format!("╰─{}─╯", "─".repeat(inner_width));
+    render_string_line(
+        canvas,
+        rect.row + rect.height.saturating_sub(1),
+        rect.column,
+        &bottom,
+        &info.face,
+        metrics,
+    );
+}
+
+fn info_rect(
+    info: &InfoState,
+    menu_rect: Option<CellRect>,
+    cols: usize,
+    rows: usize,
+    width: usize,
+    height: usize,
+) -> CellRect {
+    match info.style.as_str() {
+        "inlineAbove" => CellRect {
+            row: info
+                .anchor
+                .line
+                .saturating_sub(height)
+                .min(rows.saturating_sub(height)),
+            column: info.anchor.column.min(cols.saturating_sub(width)),
+            width,
+            height,
+        },
+        "inlineBelow" | "inline" => CellRect {
+            row: inline_popup_row(info.anchor.line, height, rows),
+            column: info.anchor.column.min(cols.saturating_sub(width)),
+            width,
+            height,
+        },
+        "menuDoc" => {
+            if let Some(menu) = menu_rect {
+                let right_column = menu.column + menu.width;
+                let left_column = menu.column.saturating_sub(width);
+                let column = if right_column + width <= cols || right_column >= menu.column {
+                    right_column.min(cols.saturating_sub(width))
+                } else {
+                    left_column
+                };
+                CellRect {
+                    row: menu.row.min(rows.saturating_sub(height)),
+                    column,
+                    width,
+                    height,
+                }
+            } else {
+                centered_rect(cols, rows, width, height)
+            }
+        }
+        "modal" => centered_rect(cols, rows, width, height),
+        "prompt" => CellRect {
+            row: rows.saturating_sub(height),
+            column: cols.saturating_sub(width),
+            width,
+            height,
+        },
+        _ => centered_rect(cols, rows, width, height),
+    }
+}
+
+fn centered_rect(cols: usize, rows: usize, width: usize, height: usize) -> CellRect {
+    CellRect {
+        row: rows.saturating_sub(height) / 2,
+        column: cols.saturating_sub(width) / 2,
+        width,
+        height,
+    }
+}
+
+fn inline_popup_row(anchor_row: usize, height: usize, rows: usize) -> usize {
+    let below = anchor_row.saturating_add(1);
+    if below + height <= rows {
+        below
+    } else {
+        anchor_row.saturating_sub(height)
     }
 }
 
@@ -715,8 +1132,7 @@ fn atom_display_width(contents: &str) -> usize {
 }
 
 fn line_display_width(line: &[Atom]) -> usize {
-    line
-        .iter()
+    line.iter()
         .map(|atom| atom_display_width(&atom.contents))
         .sum()
 }
@@ -731,7 +1147,101 @@ fn fill_line_background(
     let bg = resolve_face_color(&default_face.bg, &default_face.bg, FALLBACK_BG).to_color();
     let mut paint = Paint::default();
     paint.set_anti_alias(false).set_color(bg);
-    fill_cells(canvas, 0, PADDING + row * metrics.cell_height, cols, metrics, &paint);
+    fill_cells(
+        canvas,
+        0,
+        PADDING + row * metrics.cell_height,
+        cols,
+        metrics,
+        &paint,
+    );
+}
+
+fn fill_line_segment(
+    canvas: &Canvas,
+    row: usize,
+    column: usize,
+    width: usize,
+    face: &Face,
+    metrics: &CellMetrics,
+) {
+    let bg = resolve_face_color(&face.bg, &face.bg, FALLBACK_BG).to_color();
+    let mut paint = Paint::default();
+    paint.set_anti_alias(false).set_color(bg);
+    fill_cells(
+        canvas,
+        column,
+        PADDING + row * metrics.cell_height,
+        width,
+        metrics,
+        &paint,
+    );
+}
+
+fn fill_rect(canvas: &Canvas, rect: CellRect, face: &Face, metrics: &CellMetrics) {
+    for row in rect.row..rect.row + rect.height {
+        fill_line_segment(canvas, row, rect.column, rect.width, face, metrics);
+    }
+}
+
+fn render_string_line(
+    canvas: &Canvas,
+    row: usize,
+    column: usize,
+    text: &str,
+    default_face: &Face,
+    metrics: &CellMetrics,
+) {
+    if text.is_empty() {
+        return;
+    }
+
+    let atoms = [Atom {
+        face: Face::default(),
+        contents: text.to_string(),
+    }];
+    render_line_at(
+        canvas,
+        row,
+        column,
+        &atoms,
+        default_face,
+        column + atom_display_width(text),
+        metrics,
+    );
+}
+
+fn truncate_atoms(line: &[Atom], max_width: usize) -> Vec<Atom> {
+    let mut remaining = max_width;
+    let mut result = Vec::new();
+
+    for atom in line {
+        if remaining == 0 {
+            break;
+        }
+
+        let mut contents = String::new();
+        for ch in atom.contents.chars() {
+            if ch == '\n' {
+                continue;
+            }
+            let width = UnicodeWidthChar::width(ch).unwrap_or(1).max(1);
+            if width > remaining {
+                break;
+            }
+            contents.push(ch);
+            remaining -= width;
+        }
+
+        if !contents.is_empty() {
+            result.push(Atom {
+                face: atom.face.clone(),
+                contents,
+            });
+        }
+    }
+
+    result
 }
 
 fn fill_cells(
@@ -768,12 +1278,7 @@ fn draw_glyph(
     let baseline = top as f32 + metrics.baseline_offset;
     let mut utf8 = [0; 4];
     let text = ch.encode_utf8(&mut utf8);
-    canvas.draw_str(
-        text,
-        (left as f32, baseline),
-        &metrics.font,
-        paint,
-    );
+    canvas.draw_str(text, (left as f32, baseline), &metrics.font, paint);
 }
 
 fn send_resize(tx: &Sender<String>, window: &Window, renderer: &Renderer) {
@@ -817,7 +1322,8 @@ fn send_rpc(tx: &Sender<String>, method: &str, params: Value) {
 
 fn pointer_position_to_coord(x: f64, y: f64, renderer: &Renderer, window: &Window) -> Coord {
     let metrics = renderer.metrics(window.scale_factor());
-    let column = ((x - PADDING as f64).max(0.0) / metrics.cell_width.max(1) as f64).floor() as usize;
+    let column =
+        ((x - PADDING as f64).max(0.0) / metrics.cell_width.max(1) as f64).floor() as usize;
     let line = ((y - PADDING as f64).max(0.0) / metrics.cell_height.max(1) as f64).floor() as usize;
     Coord { line, column }
 }
@@ -837,11 +1343,7 @@ fn scroll_delta_to_kak(delta: MouseScrollDelta) -> Option<i32> {
         MouseScrollDelta::PixelDelta(position) => dominant_scroll_component(position.x, position.y),
     };
 
-    if amount == 0 {
-        None
-    } else {
-        Some(amount)
-    }
+    if amount == 0 { None } else { Some(amount) }
 }
 
 fn dominant_scroll_component(x: f64, y: f64) -> i32 {
@@ -1016,11 +1518,12 @@ impl Renderer {
         }
 
         let physical_font_size = (self.logical_font_size as f64 * scale_factor) as f32;
-        let typeface = preferred_typeface(&self.font_mgr, &self.preferred_font_family).unwrap_or_else(|| {
-            self.font_mgr
-                .match_family_style("", FontStyle::normal())
-                .expect("expected a fallback system typeface")
-        });
+        let typeface = preferred_typeface(&self.font_mgr, &self.preferred_font_family)
+            .unwrap_or_else(|| {
+                self.font_mgr
+                    .match_family_style("", FontStyle::normal())
+                    .expect("expected a fallback system typeface")
+            });
 
         let mut font = Font::new(typeface, physical_font_size);
         font.set_subpixel(true)
@@ -1178,5 +1681,53 @@ mod tests {
         assert_eq!(config.font_family, "SF Mono");
         assert_eq!(config.font_size, 15.0);
         assert!(config.transparent_menubar);
+    }
+
+    #[test]
+    fn parses_menu_show_payload() {
+        let notification = parse_notification(
+            r#"{"jsonrpc":"2.0","method":"menu_show","params":[[[{"face":{"fg":"default","bg":"default","underline":"default","attributes":[]},"contents":"item"}]],{"line":1,"column":2},{"fg":"white","bg":"blue","underline":"default","attributes":[]},{"fg":"black","bg":"white","underline":"default","attributes":[]},"prompt"]}"#,
+        )
+        .unwrap();
+
+        match notification {
+            RpcNotification::MenuShow {
+                items,
+                anchor,
+                style,
+                ..
+            } => {
+                assert_eq!(items.len(), 1);
+                assert_eq!(anchor.line, 1);
+                assert_eq!(anchor.column, 2);
+                assert_eq!(style, "prompt");
+            }
+            other => panic!("unexpected notification: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_info_show_payload() {
+        let notification = parse_notification(
+            r#"{"jsonrpc":"2.0","method":"info_show","params":[[{"face":{"fg":"default","bg":"default","underline":"default","attributes":[]},"contents":"title"}],[[{"face":{"fg":"default","bg":"default","underline":"default","attributes":[]},"contents":"body"}]],{"line":3,"column":4},{"fg":"white","bg":"black","underline":"default","attributes":[]},"modal"]}"#,
+        )
+        .unwrap();
+
+        match notification {
+            RpcNotification::InfoShow {
+                title,
+                content,
+                anchor,
+                style,
+                ..
+            } => {
+                assert_eq!(title.len(), 1);
+                assert_eq!(content.len(), 1);
+                assert_eq!(anchor.line, 3);
+                assert_eq!(anchor.column, 4);
+                assert_eq!(style, "modal");
+            }
+            other => panic!("unexpected notification: {other:?}"),
+        }
     }
 }
