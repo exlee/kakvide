@@ -17,7 +17,7 @@ use skia_safe::{
 use softbuffer::{Context as SoftContext, Surface};
 use unicode_width::UnicodeWidthChar;
 use winit::dpi::LogicalSize;
-use winit::event::{ElementState, Event, Ime, KeyEvent, WindowEvent};
+use winit::event::{ElementState, Event, Ime, KeyEvent, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop, EventLoopProxy};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
@@ -193,6 +193,8 @@ fn main() -> Result<()> {
     let command_tx = spawn_stdin_writer(&mut child)?;
 
     let mut modifiers = ModifiersState::empty();
+    let mut mouse_cell = Coord { line: 0, column: 0 };
+    let mut did_force_startup_resize = false;
     let mut state = AppState::default();
 
     send_resize(&command_tx, &window, &renderer);
@@ -207,7 +209,13 @@ fn main() -> Result<()> {
                 window.request_redraw();
             }
             Event::UserEvent(AppEvent::Rpc(notification)) => {
+                let should_force_resize =
+                    matches!(notification, RpcNotification::Draw { .. }) && !did_force_startup_resize;
                 apply_notification(&mut state, notification);
+                if should_force_resize {
+                    send_resize(&command_tx, &window, &renderer);
+                    did_force_startup_resize = true;
+                }
                 window.request_redraw();
             }
             Event::UserEvent(AppEvent::KakouneExited) => {
@@ -249,6 +257,23 @@ fn main() -> Result<()> {
                         if let Some(keys) = key_event_to_kak(&event, modifiers) {
                             send_keys(&command_tx, &[keys]);
                         }
+                    }
+                }
+                WindowEvent::CursorMoved { position, .. } => {
+                    mouse_cell = pointer_position_to_coord(position.x, position.y, &renderer, &window);
+                    send_mouse_move(&command_tx, mouse_cell);
+                }
+                WindowEvent::MouseInput { state, button, .. } => {
+                    match state {
+                        ElementState::Pressed => send_mouse_button(&command_tx, "mouse_press", button, mouse_cell),
+                        ElementState::Released => {
+                            send_mouse_button(&command_tx, "mouse_release", button, mouse_cell)
+                        }
+                    }
+                }
+                WindowEvent::MouseWheel { delta, .. } => {
+                    if let Some(amount) = scroll_delta_to_kak(delta) {
+                        send_scroll(&command_tx, amount, mouse_cell);
                     }
                 }
                 WindowEvent::ScaleFactorChanged { .. } => {
@@ -498,8 +523,10 @@ fn render_canvas(
 
     let cols = width.saturating_sub(PADDING * 2) / metrics.cell_width.max(1);
     let rows = height.saturating_sub(PADDING * 2) / metrics.cell_height.max(1);
+    let status_rows = state.status.as_ref().map(status_rows).unwrap_or(0);
+    let grid_rows = rows.saturating_sub(status_rows);
 
-    for (row_index, line) in state.grid.lines.iter().take(rows).enumerate() {
+    for (row_index, line) in state.grid.lines.iter().take(grid_rows).enumerate() {
         render_line(
             canvas,
             row_index,
@@ -511,25 +538,64 @@ fn render_canvas(
     }
 
     if let Some(status) = &state.status {
-        let status_row = rows.saturating_sub(1);
+        render_status(canvas, rows, cols, status, metrics);
+    }
+
+    if state.grid.cursor_pos.line < grid_rows {
+        render_cursor(
+            canvas,
+            state.grid.cursor_pos,
+            &state.grid.default_face,
+            metrics,
+        );
+    }
+}
+
+fn render_status(
+    canvas: &Canvas,
+    total_rows: usize,
+    cols: usize,
+    status: &StatusState,
+    metrics: &CellMetrics,
+) {
+    let mut bottom_row = total_rows.saturating_sub(1);
+
+    if !status.mode_line.is_empty() {
+        render_line(
+            canvas,
+            bottom_row,
+            &status.mode_line,
+            &status.default_face,
+            cols,
+            metrics,
+        );
+        bottom_row = bottom_row.saturating_sub(1);
+    }
+
+    if !status.prompt.is_empty() || !status.content.is_empty() {
         let mut line = status.prompt.clone();
         line.extend(status.content.clone());
         render_line(
             canvas,
-            status_row,
+            bottom_row,
             &line,
             &status.default_face,
             cols,
             metrics,
         );
-    }
 
-    render_cursor(
-        canvas,
-        state.grid.cursor_pos,
-        &state.grid.default_face,
-        metrics,
-    );
+        if status.cursor_pos >= 0 {
+            render_cursor(
+                canvas,
+                Coord {
+                    line: bottom_row,
+                    column: status.cursor_pos as usize,
+                },
+                &status.default_face,
+                metrics,
+            );
+        }
+    }
 }
 
 fn render_line(
@@ -657,6 +723,20 @@ fn send_keys(tx: &Sender<String>, keys: &[String]) {
     );
 }
 
+fn send_mouse_move(tx: &Sender<String>, coord: Coord) {
+    send_rpc(tx, "mouse_move", json!([coord.line, coord.column]));
+}
+
+fn send_mouse_button(tx: &Sender<String>, method: &str, button: MouseButton, coord: Coord) {
+    if let Some(button) = mouse_button_to_kak(button) {
+        send_rpc(tx, method, json!([button, coord.line, coord.column]));
+    }
+}
+
+fn send_scroll(tx: &Sender<String>, amount: i32, coord: Coord) {
+    send_rpc(tx, "scroll", json!([amount, coord.line, coord.column]));
+}
+
 fn send_rpc(tx: &Sender<String>, method: &str, params: Value) {
     let message = json!({
         "jsonrpc": "2.0",
@@ -664,6 +744,57 @@ fn send_rpc(tx: &Sender<String>, method: &str, params: Value) {
         "params": params,
     });
     let _ = tx.send(message.to_string());
+}
+
+fn pointer_position_to_coord(x: f64, y: f64, renderer: &Renderer, window: &Window) -> Coord {
+    let metrics = renderer.metrics(window.scale_factor());
+    let column = ((x - PADDING as f64).max(0.0) / metrics.cell_width.max(1) as f64).floor() as usize;
+    let line = ((y - PADDING as f64).max(0.0) / metrics.cell_height.max(1) as f64).floor() as usize;
+    Coord { line, column }
+}
+
+fn mouse_button_to_kak(button: MouseButton) -> Option<&'static str> {
+    match button {
+        MouseButton::Left => Some("left"),
+        MouseButton::Right => Some("right"),
+        MouseButton::Middle => Some("middle"),
+        _ => None,
+    }
+}
+
+fn scroll_delta_to_kak(delta: MouseScrollDelta) -> Option<i32> {
+    let amount = match delta {
+        MouseScrollDelta::LineDelta(x, y) => dominant_scroll_component(x as f64, y as f64),
+        MouseScrollDelta::PixelDelta(position) => dominant_scroll_component(position.x, position.y),
+    };
+
+    if amount == 0 {
+        None
+    } else {
+        Some(amount)
+    }
+}
+
+fn dominant_scroll_component(x: f64, y: f64) -> i32 {
+    let dominant = if y.abs() >= x.abs() { y } else { x };
+    if dominant > 0.0 {
+        -dominant.abs().ceil() as i32
+    } else if dominant < 0.0 {
+        dominant.abs().ceil() as i32
+    } else {
+        0
+    }
+}
+
+fn status_rows(status: &StatusState) -> usize {
+    let mut rows = 0;
+    if !status.mode_line.is_empty() {
+        rows += 1;
+    }
+    if !status.prompt.is_empty() || !status.content.is_empty() {
+        rows += 1;
+    }
+    rows
 }
 
 fn key_event_to_kak(event: &KeyEvent, modifiers: ModifiersState) -> Option<String> {
@@ -890,6 +1021,40 @@ mod tests {
         assert_eq!(
             modified_character_key_to_kak(&key, modifiers).as_deref(),
             Some("<s-c-p>")
+        );
+    }
+
+    #[test]
+    fn status_uses_mode_line_and_prompt_rows() {
+        let status = StatusState {
+            prompt: vec![Atom {
+                face: Face::default(),
+                contents: ":".into(),
+            }],
+            content: vec![Atom {
+                face: Face::default(),
+                contents: "w".into(),
+            }],
+            cursor_pos: 1,
+            mode_line: vec![Atom {
+                face: Face::default(),
+                contents: "status".into(),
+            }],
+            default_face: Face::default(),
+            style: "status".into(),
+        };
+        assert_eq!(status_rows(&status), 2);
+    }
+
+    #[test]
+    fn scroll_delta_maps_wheel_up_to_negative_kak_scroll() {
+        assert_eq!(
+            scroll_delta_to_kak(MouseScrollDelta::LineDelta(0.0, 1.0)),
+            Some(-1)
+        );
+        assert_eq!(
+            scroll_delta_to_kak(MouseScrollDelta::LineDelta(0.0, -2.0)),
+            Some(2)
         );
     }
 }
