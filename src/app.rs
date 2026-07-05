@@ -13,6 +13,9 @@ use crate::kakoune_messages::{
 use crate::user_keys::UserKeysConfig;
 use winit::window::WindowId;
 
+pub const DEFAULT_WINDOW_TITLE: &str = "kakvide";
+pub const WINDOW_TITLE_UI_OPTION: &str = "kakvide_title";
+
 #[derive(Parser, Debug, Clone)]
 #[command(trailing_var_arg = true)]
 pub struct Args {
@@ -112,12 +115,25 @@ pub struct InfoState {
     pub style: InfoStyle,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct AppState {
     pub grid: GridState,
     pub status: Option<StatusState>,
     pub menu: Option<MenuState>,
     pub info: Option<InfoState>,
+    pub window_title: String,
+}
+
+impl Default for AppState {
+    fn default() -> Self {
+        Self {
+            grid: GridState::default(),
+            status: None,
+            menu: None,
+            info: None,
+            window_title: DEFAULT_WINDOW_TITLE.to_string(),
+        }
+    }
 }
 
 pub fn load_config() -> Result<AppConfig> {
@@ -224,7 +240,7 @@ pub fn apply_notification(state: &mut AppState, notification: KakouneNotificatio
             let _ = force;
         }
         KakouneNotification::SetUiOptions { options } => {
-            let _ = options;
+            state.window_title = window_title_from_ui_options(&options);
         }
         KakouneNotification::MenuShow {
             items,
@@ -269,6 +285,19 @@ pub fn apply_notification(state: &mut AppState, notification: KakouneNotificatio
             state.info = None;
         }
     }
+}
+
+fn window_title_from_ui_options(options: &serde_json::Map<String, serde_json::Value>) -> String {
+    let Some(path) = options
+        .get(WINDOW_TITLE_UI_OPTION)
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+    else {
+        return DEFAULT_WINDOW_TITLE.to_string();
+    };
+
+    format!("{DEFAULT_WINDOW_TITLE} - {path}")
 }
 
 #[cfg(test)]
@@ -347,5 +376,53 @@ mod tests {
         assert_eq!(config.mouse_scroll_rate, 0.25);
         assert!(config.transparent_menubar);
         assert_eq!(config.keys, UserKeysConfig::default());
+    }
+
+    #[test]
+    fn set_ui_options_updates_window_title_from_kakvide_title() {
+        let mut state = AppState::default();
+        let mut options = serde_json::Map::new();
+        options.insert(
+            WINDOW_TITLE_UI_OPTION.to_string(),
+            serde_json::Value::String("/tmp/project".to_string()),
+        );
+
+        apply_notification(&mut state, KakouneNotification::SetUiOptions { options });
+
+        assert_eq!(state.window_title, "kakvide - /tmp/project");
+    }
+
+    #[test]
+    fn set_ui_options_uses_default_window_title_for_missing_title() {
+        let mut state = AppState {
+            window_title: "kakvide - /tmp/project".to_string(),
+            ..AppState::default()
+        };
+
+        apply_notification(
+            &mut state,
+            KakouneNotification::SetUiOptions {
+                options: serde_json::Map::new(),
+            },
+        );
+
+        assert_eq!(state.window_title, DEFAULT_WINDOW_TITLE);
+    }
+
+    #[test]
+    fn set_ui_options_uses_default_window_title_for_empty_title() {
+        let mut state = AppState {
+            window_title: "kakvide - /tmp/project".to_string(),
+            ..AppState::default()
+        };
+        let mut options = serde_json::Map::new();
+        options.insert(
+            WINDOW_TITLE_UI_OPTION.to_string(),
+            serde_json::Value::String("  ".to_string()),
+        );
+
+        apply_notification(&mut state, KakouneNotification::SetUiOptions { options });
+
+        assert_eq!(state.window_title, DEFAULT_WINDOW_TITLE);
     }
 }

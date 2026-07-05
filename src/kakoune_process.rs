@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use winit::event_loop::EventLoopProxy;
 use winit::window::WindowId;
 
-use crate::app::{AppEvent, Args};
+use crate::app::{AppEvent, Args, WINDOW_TITLE_UI_OPTION};
 use crate::diagnostics::log_error;
 use crate::kakoune_messages::parse_notification;
 
@@ -122,17 +122,34 @@ pub fn build_kakoune_help_command(kak_bin: &OsStr) -> Command {
     platform_kakoune_help_command(kak_bin)
 }
 
+fn append_kakoune_json_ui_args(command: &mut Command, args: &Args) {
+    command
+        .arg("-ui")
+        .arg("json")
+        .arg("-e")
+        .arg(kakvide_directory_title_ui_options_command())
+        .args(&args.kak_args);
+}
+
+fn kakvide_directory_title_ui_options_command() -> String {
+    format!(
+        "hook global EnterDirectory .* %{{ set-option -add window ui_options \"{0}=%val{{hook_param}}\" }}; \
+         set-option -add window ui_options \"{0}=%sh{{pwd}}\"",
+        WINDOW_TITLE_UI_OPTION
+    )
+}
+
 #[cfg(unix)]
 fn platform_kakoune_command(args: &Args) -> Command {
     if let Some(shell) = user_shell() {
         let mut command = shell_command(shell, OsStr::new(&args.kak_bin));
-        command.arg("-ui").arg("json").args(&args.kak_args);
+        append_kakoune_json_ui_args(&mut command, args);
         command
     } else {
         let (program, constrained_path) = constrained_app_program(OsStr::new(&args.kak_bin));
         let mut command = Command::new(program);
         apply_constrained_app_path(&mut command, constrained_path);
-        command.arg("-ui").arg("json").args(&args.kak_args);
+        append_kakoune_json_ui_args(&mut command, args);
         command
     }
 }
@@ -155,8 +172,7 @@ fn platform_kakoune_help_command(kak_bin: &OsStr) -> Command {
 #[cfg(windows)]
 fn platform_kakoune_command(args: &Args) -> Command {
     let mut command = Command::new(&args.kak_bin);
-    command.arg("-ui").arg("json");
-    command.args(&args.kak_args);
+    append_kakoune_json_ui_args(&mut command, args);
     command
 }
 
@@ -301,7 +317,6 @@ mod tests {
 
     use crate::kakoune_messages::KakouneNotification;
 
-    #[cfg(windows)]
     use super::build_kakoune_command;
     #[cfg(windows)]
     use crate::app::Args;
@@ -344,6 +359,16 @@ mod tests {
         }
     }
 
+    #[test]
+    fn title_ui_options_command_tracks_working_directory() {
+        let command = super::kakvide_directory_title_ui_options_command();
+
+        assert!(command.contains("EnterDirectory"));
+        assert!(command.contains("%val{hook_param}"));
+        assert!(command.contains("%sh{pwd}"));
+        assert!(!command.contains("buffile"));
+    }
+
     #[cfg(windows)]
     #[test]
     fn build_kakoune_command_includes_json_ui_before_forwarded_args() {
@@ -365,6 +390,8 @@ mod tests {
             vec![
                 OsString::from("-ui"),
                 OsString::from("json"),
+                OsString::from("-e"),
+                OsString::from(super::kakvide_directory_title_ui_options_command()),
                 OsString::from("-d"),
                 OsString::from("-e"),
                 OsString::from("echo hi"),
@@ -376,8 +403,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn unix_shell_command_runs_kak_through_shell_lc() {
-        let mut command = super::shell_command(OsString::from("/bin/sh"), OsStr::new("kak"));
-        command.arg("-ui").arg("json").arg("file.txt");
+        let args = crate::app::Args {
+            kak_bin: "kak".to_string(),
+            kak_args: vec![OsString::from("file.txt")],
+        };
+        let command = build_kakoune_command(&args);
         let actual_args: Vec<_> = command.get_args().map(OsString::from).collect();
 
         assert_eq!(
@@ -389,6 +419,8 @@ mod tests {
                 OsString::from("kak"),
                 OsString::from("-ui"),
                 OsString::from("json"),
+                OsString::from("-e"),
+                OsString::from(super::kakvide_directory_title_ui_options_command()),
                 OsString::from("file.txt"),
             ]
         );

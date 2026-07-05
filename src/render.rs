@@ -97,6 +97,8 @@ pub fn render(
             config.transparent_menubar,
             window.scale_factor(),
         ),
+        width,
+        config.transparent_menubar,
     );
 
     buffer
@@ -105,9 +107,25 @@ pub fn render(
     Ok(())
 }
 
-fn render_canvas(canvas: &Canvas, state: &AppState, metrics: &CellMetrics, layout: LayoutMetrics) {
+fn render_canvas(
+    canvas: &Canvas,
+    state: &AppState,
+    metrics: &CellMetrics,
+    layout: LayoutMetrics,
+    width: usize,
+    transparent_menubar: bool,
+) {
     let default_face = resolve_root_face(&state.grid.default_face, FALLBACK_FG, FALLBACK_BG);
     canvas.clear(default_face.bg.to_color());
+    render_window_title(
+        canvas,
+        &state.window_title,
+        &state.grid.default_face,
+        metrics,
+        layout,
+        width,
+        transparent_menubar,
+    );
 
     let cols = layout.cols;
     let rows = layout.rows;
@@ -161,6 +179,43 @@ fn render_canvas(canvas: &Canvas, state: &AppState, metrics: &CellMetrics, layou
             layout.top_padding,
         );
     }
+}
+
+fn render_window_title(
+    canvas: &Canvas,
+    title: &str,
+    default_face: &Face,
+    metrics: &CellMetrics,
+    layout: LayoutMetrics,
+    window_width: usize,
+    transparent_menubar: bool,
+) {
+    if !transparent_menubar || layout.top_padding <= PADDING || title.is_empty() {
+        return;
+    }
+
+    let max_columns = window_width
+        .saturating_sub(PADDING * 2)
+        .checked_div(metrics.cell_width.max(1))
+        .unwrap_or(0);
+    let title = truncate_title(title, max_columns);
+    if title.is_empty() {
+        return;
+    }
+
+    let mut paint = Paint::default();
+    paint.set_anti_alias(true);
+    paint.set_color(
+        resolve_root_face(default_face, FALLBACK_FG, FALLBACK_BG)
+            .fg
+            .to_color(),
+    );
+
+    let text_width = metrics.font.measure_str(&title, Some(&paint)).0;
+    let left = ((window_width as f32 - text_width) / 2.0).max(PADDING as f32);
+    let top = layout.top_padding.saturating_sub(metrics.cell_height) / 2;
+    let baseline = top as f32 + metrics.baseline_offset;
+    canvas.draw_str(title, (left, baseline), &metrics.font, &paint);
 }
 
 fn render_status(
@@ -485,6 +540,17 @@ pub(in crate::render) fn truncate_atoms(line: &[Atom], max_width: usize) -> Vec<
     result
 }
 
+fn truncate_title(title: &str, max_width: usize) -> String {
+    let atoms = [Atom {
+        face: Face::default(),
+        contents: title.to_string(),
+    }];
+    truncate_atoms(&atoms, max_width)
+        .into_iter()
+        .map(|atom| atom.contents)
+        .collect()
+}
+
 pub(in crate::render) fn render_string_line(
     canvas: &Canvas,
     row: usize,
@@ -791,6 +857,14 @@ mod tests {
 
         assert_eq!(atom_display_width(&line[1].contents), 0);
         assert_eq!(line_display_width(&line), 9);
+    }
+
+    #[test]
+    fn title_truncation_limits_display_width() {
+        let title = truncate_title("kakvide - /tmp/long/path.txt", 12);
+
+        assert_eq!(title, "kakvide - /t");
+        assert_eq!(atom_display_width(&title), 12);
     }
 
     #[test]
