@@ -40,12 +40,15 @@ use app::{
 use diagnostics::log_error;
 use input::{
     MouseMotionState, ScrollState, key_event_to_kak, pointer_position_to_coord,
-    scroll_delta_to_kak, send_keys, send_mouse_button, send_mouse_move, send_resize, send_scroll,
+    scroll_delta_to_kak, send_keys, send_mouse_button, send_mouse_move, send_paste, send_resize,
+    send_scroll,
 };
-use kakoune_messages::{Coord, KakouneNotification};
+use kakoune_messages::{Coord, KakouneNotification, StatusStyle};
 #[cfg(unix)]
 use kakoune_process::spawn_client_close_listener;
-use kakoune_process::{build_kakoune_help_command, spawn_kakoune, spawn_stdin_writer};
+use kakoune_process::{
+    build_kakoune_help_command, kakvide_post_boot_command, spawn_kakoune, spawn_stdin_writer,
+};
 use render::{Renderer, load_renderer, render, resize_surface};
 use user_keys::{FontSizeAction, UserAction, UserKeys};
 
@@ -143,8 +146,17 @@ struct ClientWindow {
     mouse_motion_state: MouseMotionState,
     scroll_state: ScrollState,
     did_force_startup_resize: bool,
+    kakvide_hook_install_state: KakvideHookInstallState,
+    kakvide_post_boot_command: String,
     state: AppState,
     renderer: Renderer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KakvideHookInstallState {
+    NotStarted,
+    WaitingForCommandPrompt,
+    Installed,
 }
 
 impl ClientWindow {
@@ -185,7 +197,7 @@ fn create_client_window(
     resize_surface(&mut surface, window.inner_size())?;
 
     let renderer = load_renderer(config);
-    let mut child = spawn_kakoune(args, proxy, window.id(), client_close_socket)?;
+    let mut child = spawn_kakoune(args, proxy, window.id())?;
     let command_tx = spawn_stdin_writer(&mut child)?;
 
     let client = ClientWindow {
@@ -200,6 +212,8 @@ fn create_client_window(
         mouse_motion_state: MouseMotionState::default(),
         scroll_state: ScrollState::default(),
         did_force_startup_resize: false,
+        kakvide_hook_install_state: KakvideHookInstallState::NotStarted,
+        kakvide_post_boot_command: kakvide_post_boot_command(client_close_socket),
         state: AppState::default(),
         renderer,
     };
@@ -290,6 +304,46 @@ fn client_name_from_ui_options(
         .and_then(|title| title.rsplit_once(" - ").map(|(_, client)| client.trim()))
         .filter(|client| !client.is_empty())
         .map(str::to_string)
+}
+
+fn kakvide_hook_prompt_keys() -> Vec<String> {
+    vec![":".to_string()]
+}
+
+fn install_kakvide_hooks_once(
+    client: &mut ClientWindow,
+    notification: &KakouneNotification,
+) -> bool {
+    match client.kakvide_hook_install_state {
+        KakvideHookInstallState::NotStarted => {
+            send_keys(&client.command_tx, &kakvide_hook_prompt_keys());
+            client.kakvide_hook_install_state = KakvideHookInstallState::WaitingForCommandPrompt;
+            true
+        }
+        KakvideHookInstallState::WaitingForCommandPrompt => {
+            if matches!(
+                notification,
+                KakouneNotification::DrawStatus {
+                    style: StatusStyle::Command,
+                    ..
+                }
+            ) {
+                send_paste(
+                    &client.command_tx,
+                    &format!(
+                        " evaluate-commands -draft %{{{}}}",
+                        client.kakvide_post_boot_command
+                    ),
+                );
+                send_keys(&client.command_tx, &[String::from("<ret>")]);
+                client.kakvide_hook_install_state = KakvideHookInstallState::Installed;
+                true
+            } else {
+                false
+            }
+        }
+        KakvideHookInstallState::Installed => false,
+    }
 }
 
 fn adjust_client_font_size(client: &mut ClientWindow, action: FontSizeAction, config: &AppConfig) {
@@ -466,6 +520,8 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
         client_close_socket.as_deref(),
     )?;
     let kakoune_session = resolve_kakoune_session(&args.kak_args, initial_client.child.id());
+    let mut pending_startup_open_files =
+        Some(startup_open_files(&args.kak_args)).filter(|paths| !paths.is_empty());
     initial_client.session = kakoune_session.clone();
     let kak_bin = args.kak_bin.clone();
     let mut clients = HashMap::new();
@@ -493,6 +549,7 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
             }
             Event::UserEvent(AppEvent::Rpc(window_id, notification)) => {
                 if let Some(client) = clients.get_mut(&window_id) {
+                    install_kakvide_hooks_once(client, notification.as_ref());
                     let should_force_resize =
                         matches!(notification.as_ref(), KakouneNotification::Draw { .. })
                             && !client.did_force_startup_resize;
@@ -527,6 +584,9 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                 remove_closed_client(&mut clients, &session, &client_id, elwt);
             }
             Event::UserEvent(AppEvent::OpenFiles(paths)) => {
+                if should_ignore_startup_open_files(&mut pending_startup_open_files, &paths) {
+                    return;
+                }
                 RuntimeContext {
                     elwt,
                     clients: &mut clients,
@@ -750,6 +810,43 @@ fn resolve_kakoune_session(kak_args: &[OsString], child_id: u32) -> OsString {
     explicit_kakoune_session(kak_args).unwrap_or_else(|| OsString::from(child_id.to_string()))
 }
 
+fn startup_open_files(kak_args: &[OsString]) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    let mut args = kak_args.iter();
+
+    while let Some(arg) = args.next() {
+        if arg == "--" {
+            files.extend(args.map(PathBuf::from));
+            break;
+        }
+
+        if matches!(arg.to_str(), Some("-c" | "-C" | "-s" | "-e")) {
+            let _ = args.next();
+            continue;
+        }
+
+        if arg.to_string_lossy().starts_with('-') {
+            continue;
+        }
+
+        files.push(PathBuf::from(arg));
+    }
+
+    files
+}
+
+fn should_ignore_startup_open_files(
+    pending_startup_open_files: &mut Option<Vec<PathBuf>>,
+    paths: &[PathBuf],
+) -> bool {
+    if pending_startup_open_files.as_deref() == Some(paths) {
+        *pending_startup_open_files = None;
+        true
+    } else {
+        false
+    }
+}
+
 fn explicit_kakoune_session(kak_args: &[OsString]) -> Option<OsString> {
     let mut args = kak_args.iter();
     while let Some(arg) = args.next() {
@@ -777,9 +874,10 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        client_name_from_ui_options, connected_kakoune_args, default_launch_directory,
-        extract_kak_bin, resolve_kakoune_session, should_show_combined_help,
-        should_update_native_window_title,
+        KakvideHookInstallState, client_name_from_ui_options, connected_kakoune_args,
+        default_launch_directory, extract_kak_bin, kakvide_hook_prompt_keys,
+        resolve_kakoune_session, should_ignore_startup_open_files, should_show_combined_help,
+        should_update_native_window_title, startup_open_files,
     };
     use crate::app::AppConfig;
 
@@ -861,6 +959,23 @@ mod tests {
     }
 
     #[test]
+    fn kakvide_hook_prompt_keys_open_command_prompt() {
+        assert_eq!(kakvide_hook_prompt_keys(), vec![":".to_string()]);
+    }
+
+    #[test]
+    fn kakvide_hooks_wait_for_command_prompt_before_installing() {
+        assert_eq!(
+            KakvideHookInstallState::WaitingForCommandPrompt,
+            KakvideHookInstallState::WaitingForCommandPrompt
+        );
+        assert_ne!(
+            KakvideHookInstallState::WaitingForCommandPrompt,
+            KakvideHookInstallState::Installed
+        );
+    }
+
+    #[test]
     fn transparent_menubar_skips_native_window_title_updates_on_macos() {
         let transparent_config = AppConfig {
             transparent_menubar: true,
@@ -926,6 +1041,36 @@ mod tests {
             ),
             OsString::from("maybe-work")
         );
+    }
+
+    #[test]
+    fn startup_open_files_skips_known_option_values() {
+        assert_eq!(
+            startup_open_files(&[
+                OsString::from("-e"),
+                OsString::from("echo hi"),
+                OsString::from("-s"),
+                OsString::from("work"),
+                OsString::from("file.txt"),
+                OsString::from("--"),
+                OsString::from("-literal"),
+            ]),
+            vec![PathBuf::from("file.txt"), PathBuf::from("-literal")]
+        );
+    }
+
+    #[test]
+    fn startup_open_files_are_ignored_only_once() {
+        let mut pending = Some(vec![PathBuf::from("file.txt")]);
+
+        assert!(should_ignore_startup_open_files(
+            &mut pending,
+            &[PathBuf::from("file.txt")]
+        ));
+        assert!(!should_ignore_startup_open_files(
+            &mut pending,
+            &[PathBuf::from("file.txt")]
+        ));
     }
 
     #[test]

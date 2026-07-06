@@ -65,6 +65,15 @@ pub fn send_keys(tx: &Sender<String>, keys: &[String]) {
     );
 }
 
+pub fn send_paste(tx: &Sender<String>, content: &str) {
+    send_request(
+        tx,
+        KakouneRequest::Paste {
+            content: content.to_string(),
+        },
+    );
+}
+
 pub fn send_mouse_move(tx: &Sender<String>, coord: Coord) {
     send_request(tx, KakouneRequest::MouseMove { coord });
 }
