@@ -120,6 +120,24 @@
     </dict>
     <dict>
       <key>CFBundleTypeExtensions</key>
+      <array/>
+      <key>CFBundleTypeName</key>
+      <string>Folder</string>
+      <key>CFBundleTypeOSTypes</key>
+      <array>
+        <string>****</string>
+      </array>
+      <key>CFBundleTypeRole</key>
+      <string>Editor</string>
+      <key>LSHandlerRank</key>
+      <string>Default</string>
+      <key>LSItemContentTypes</key>
+      <array>
+        <string>public.folder</string>
+      </array>
+    </dict>
+    <dict>
+      <key>CFBundleTypeExtensions</key>
       <array>
         <string>*</string>
       </array>
@@ -130,11 +148,12 @@
         <string>****</string>
       </array>
       <key>CFBundleTypeRole</key>
-      <string>Viewer</string>
+      <string>Editor</string>
       <key>LSHandlerRank</key>
-      <string>Alternate</string>
+      <string>Default</string>
       <key>LSItemContentTypes</key>
       <array>
+        <string>public.item</string>
         <string>public.data</string>
         <string>public.folder</string>
         <string>com.apple.package</string>

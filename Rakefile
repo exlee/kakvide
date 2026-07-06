@@ -3,14 +3,14 @@ require "shellwords"
 require "tmpdir"
 
 task :clean_app do
-	sh "rm -fr /Applications/kakvide 2>/dev/null || true"
+	sh "rm -fr /Applications/Kakvide.app 2>/dev/null || true"
 end
 
 task :install_copy => [:clean_app] do
   sh "cp -pr ./target/release/bundle/osx/Kakvide.app /Applications"
 end
 
-task :install => [:clean_app, :bundle, :install_copy] do
+task :install => [:clean_app, :bundle, :install_copy, :register] do
 
 end
 
@@ -22,8 +22,13 @@ task :build_release do
   sh "cargo build --release"
 end
 
-task :register do
+task :register => [:unregister_target]  do
+
   sh "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f /Applications/Kakvide.app"
+end
+
+task :unregister_target do
+  sh "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u target/release/bundle/osx/Kakvide.app 2>/dev/null || true"
 end
 
 task :icon do
