@@ -32,12 +32,38 @@ pub struct AppConfig {
     pub font_size: f32,
     pub mouse_scroll_rate: f32,
     pub transparent_menubar: bool,
+    pub macos: MacosConfig,
     pub keys: UserKeysConfig,
 }
 
 impl Default for AppConfig {
     fn default() -> Self {
         bundled_default_config()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(default, rename_all = "kebab-case")]
+pub struct MacosConfig {
+    pub color_space: MacosColorSpace,
+}
+
+impl Default for MacosConfig {
+    fn default() -> Self {
+        bundled_default_macos_config()
+    }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum MacosColorSpace {
+    P3,
+    Srgb,
+}
+
+impl Default for MacosColorSpace {
+    fn default() -> Self {
+        Self::P3
     }
 }
 
@@ -184,7 +210,28 @@ fn bundled_default_config() -> AppConfig {
             .get("transparent-menubar")
             .and_then(Value::as_bool)
             .expect("bundled kakvide.toml should set transparent-menubar"),
+        macos: bundled_default_macos_config(),
         keys: bundled_default_keys(),
+    }
+}
+
+pub fn bundled_default_macos_config() -> MacosConfig {
+    let value = bundled_default_value();
+    let macos = value
+        .get("macos")
+        .and_then(Value::as_table)
+        .expect("bundled kakvide.toml should contain a [macos] section");
+
+    MacosConfig {
+        color_space: match macos
+            .get("color-space")
+            .and_then(Value::as_str)
+            .expect("bundled [macos] should set color-space")
+        {
+            "p3" => MacosColorSpace::P3,
+            "srgb" => MacosColorSpace::Srgb,
+            other => panic!("unsupported bundled [macos].color-space value {other}"),
+        },
     }
 }
 
@@ -425,7 +472,46 @@ mod tests {
         assert_eq!(config.font_size, 12.0);
         assert_eq!(config.mouse_scroll_rate, 0.25);
         assert!(config.transparent_menubar);
+        assert_eq!(config.macos.color_space, MacosColorSpace::P3);
         assert_eq!(config.keys, UserKeysConfig::default());
+    }
+
+    #[test]
+    fn config_parses_explicit_macos_srgb_color_space() {
+        let config: AppConfig = toml::from_str(
+            r#"
+font-family = "SF Mono"
+font-size = 12.0
+mouse-scroll-rate = 0.25
+transparent-menubar = true
+
+[macos]
+color-space = "srgb"
+"#,
+        )
+        .expect("config should parse");
+
+        assert_eq!(config.macos.color_space, MacosColorSpace::Srgb);
+    }
+
+    #[test]
+    fn config_rejects_unknown_macos_color_space() {
+        let error = toml::from_str::<AppConfig>(
+            r#"
+font-family = "SF Mono"
+font-size = 12.0
+mouse-scroll-rate = 0.25
+transparent-menubar = true
+
+[macos]
+color-space = "adobe-rgb"
+"#,
+        )
+        .expect_err("config should reject unknown color space")
+        .to_string();
+
+        assert!(error.contains("unknown variant"));
+        assert!(error.contains("adobe-rgb"));
     }
 
     #[test]

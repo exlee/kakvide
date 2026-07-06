@@ -2,16 +2,18 @@ use std::cell::RefCell;
 use std::ffi::{CString, OsString};
 use std::path::PathBuf;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use objc2::rc::Retained;
 use objc2::rc::autoreleasepool;
 use objc2::runtime::{AnyClass, AnyObject, ClassBuilder, Sel};
 use objc2::{MainThreadMarker, ProtocolType, msg_send, sel};
-use objc2_app_kit::{NSApplication, NSMenu, NSMenuDelegate, NSMenuItem};
+use objc2_app_kit::{NSApplication, NSColorSpace, NSMenu, NSMenuDelegate, NSMenuItem, NSView};
 use objc2_foundation::{NSArray, NSString};
 use winit::event_loop::EventLoopProxy;
+use winit::raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use winit::window::Window;
 
-use crate::app::{AppCommand, AppEvent};
+use crate::app::{AppCommand, AppEvent, MacosColorSpace, MacosConfig};
 use crate::diagnostics::log_error;
 use crate::kakoune_process::list_kakoune_sessions;
 
@@ -21,6 +23,23 @@ const SWITCH_SESSIONS_MENU: &str = "Switch to Session";
 thread_local! {
     static APP_PROXY: RefCell<Option<EventLoopProxy<AppEvent>>> = const { RefCell::new(None) };
     static KAK_BIN: RefCell<Option<String>> = const { RefCell::new(None) };
+}
+
+pub fn apply_window_color_space(window: &Window, config: &MacosConfig) -> Result<()> {
+    let handle = window
+        .window_handle()
+        .map_err(|error| anyhow!("failed to get raw window handle: {error}"))?;
+    let RawWindowHandle::AppKit(handle) = handle.as_raw() else {
+        return Err(anyhow!("expected AppKit window handle on macOS"));
+    };
+
+    let ns_view = unsafe { &*(handle.ns_view.as_ptr().cast::<NSView>()) };
+    let ns_window = ns_view
+        .window()
+        .context("winit AppKit view was not attached to an NSWindow")?;
+    let color_space = color_space_for_config(config.color_space);
+    ns_window.setColorSpace(Some(color_space.as_ref()));
+    Ok(())
 }
 
 pub fn install(proxy: EventLoopProxy<AppEvent>, kak_bin: String) -> Result<()> {
@@ -391,4 +410,39 @@ fn filenames_to_paths(filenames: &NSArray<NSString>) -> Vec<PathBuf> {
         paths.push(PathBuf::from(path));
     }
     paths
+}
+
+fn color_space_for_config(color_space: MacosColorSpace) -> Retained<NSColorSpace> {
+    match color_space {
+        MacosColorSpace::P3 => NSColorSpace::displayP3ColorSpace(),
+        MacosColorSpace::Srgb => NSColorSpace::sRGBColorSpace(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::color_space_for_config;
+    use crate::app::MacosColorSpace;
+
+    #[test]
+    fn p3_color_space_maps_to_display_p3() {
+        let actual = color_space_for_config(MacosColorSpace::P3);
+        let expected = objc2_app_kit::NSColorSpace::displayP3ColorSpace();
+
+        assert_eq!(
+            actual.localizedName().expect("actual should have a name"),
+            expected.localizedName().expect("expected should have a name")
+        );
+    }
+
+    #[test]
+    fn srgb_color_space_maps_to_srgb() {
+        let actual = color_space_for_config(MacosColorSpace::Srgb);
+        let expected = objc2_app_kit::NSColorSpace::sRGBColorSpace();
+
+        assert_eq!(
+            actual.localizedName().expect("actual should have a name"),
+            expected.localizedName().expect("expected should have a name")
+        );
+    }
 }

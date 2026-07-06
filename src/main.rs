@@ -238,6 +238,10 @@ fn create_active_client_window(
     client_close_socket: Option<&Path>,
 ) -> Result<ClientWindow> {
     let window = Rc::new(elwt.create_window(window_attributes(config, window_icon))?);
+    #[cfg(target_os = "macos")]
+    if let Err(error) = macos::apply_window_color_space(window.as_ref(), &config.macos) {
+        log_error(format!("macOS color space setup failed: {error:#}"));
+    }
     create_client_window(window, args, proxy, config, client_close_socket)
 }
 
