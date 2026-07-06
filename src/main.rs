@@ -159,6 +159,13 @@ enum KakvideHookInstallState {
     Installed,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupOpenState {
+    NoPendingStartupOpen,
+    WaitingForStartupOpenFiles,
+    StartupOpenHandled,
+}
+
 impl ClientWindow {
     fn window_id(&self) -> WindowId {
         self.window.id()
@@ -220,19 +227,6 @@ fn create_client_window(
     client.send_resize(config);
     client.request_redraw();
     Ok(client)
-}
-
-#[allow(deprecated)]
-fn create_initial_client_window(
-    event_loop: &EventLoop<AppEvent>,
-    args: &Args,
-    proxy: EventLoopProxy<AppEvent>,
-    config: &AppConfig,
-    window_icon: Option<Icon>,
-    client_close_socket: Option<&Path>,
-) -> Result<ClientWindow> {
-    let window = Rc::new(event_loop.create_window(window_attributes(config, window_icon))?);
-    create_client_window(window, args, proxy, config, client_close_socket)
 }
 
 fn create_active_client_window(
@@ -441,6 +435,62 @@ impl RuntimeContext<'_> {
     }
 }
 
+fn create_startup_client_window(
+    elwt: &ActiveEventLoop,
+    startup_args: &Args,
+    proxy: EventLoopProxy<AppEvent>,
+    config: &AppConfig,
+    window_icon: Option<Icon>,
+    client_close_socket: Option<&Path>,
+) -> Result<ClientWindow> {
+    create_active_client_window(
+        elwt,
+        startup_args,
+        proxy,
+        config,
+        window_icon,
+        client_close_socket,
+    )
+}
+
+fn startup_args(base_args: &Args, paths: &[PathBuf]) -> Args {
+    if paths.is_empty() {
+        return base_args.clone();
+    }
+
+    Args {
+        kak_bin: base_args.kak_bin.clone(),
+        kak_args: paths
+            .iter()
+            .map(|path| path.as_os_str().to_os_string())
+            .collect(),
+    }
+}
+
+fn startup_open_state_for_launch(is_macos: bool, kak_args: &[OsString]) -> StartupOpenState {
+    if is_macos && kak_args.is_empty() {
+        StartupOpenState::WaitingForStartupOpenFiles
+    } else {
+        StartupOpenState::NoPendingStartupOpen
+    }
+}
+
+fn should_handle_startup_open_with_files(
+    state: StartupOpenState,
+    has_clients: bool,
+    has_session: bool,
+) -> bool {
+    state == StartupOpenState::WaitingForStartupOpenFiles && !has_clients && !has_session
+}
+
+fn should_create_fallback_startup_client(
+    state: StartupOpenState,
+    has_clients: bool,
+    has_session: bool,
+) -> bool {
+    state != StartupOpenState::StartupOpenHandled && !has_clients && !has_session
+}
+
 fn app_command_from_user_action(action: UserAction) -> AppCommand {
     match action {
         UserAction::FontSize(FontSizeAction::Increase) => AppCommand::FontScaleUp,
@@ -511,21 +561,13 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
     #[cfg(not(unix))]
     let client_close_socket: Option<PathBuf> = None;
 
-    let mut initial_client = create_initial_client_window(
-        &event_loop,
-        &args,
-        proxy.clone(),
-        &config,
-        window_icon.clone(),
-        client_close_socket.as_deref(),
-    )?;
-    let kakoune_session = resolve_kakoune_session(&args.kak_args, initial_client.child.id());
     let mut pending_startup_open_files =
         Some(startup_open_files(&args.kak_args)).filter(|paths| !paths.is_empty());
-    initial_client.session = kakoune_session.clone();
     let kak_bin = args.kak_bin.clone();
-    let mut clients = HashMap::new();
-    clients.insert(initial_client.window_id(), initial_client);
+    let mut clients: HashMap<WindowId, ClientWindow> = HashMap::new();
+    let mut kakoune_session: Option<OsString> = None;
+    let mut startup_open_state =
+        startup_open_state_for_launch(cfg!(target_os = "macos"), &args.kak_args);
     #[cfg(target_os = "macos")]
     let mut did_install_macos_menus_after_winit = false;
 
@@ -584,9 +626,41 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                 remove_closed_client(&mut clients, &session, &client_id, elwt);
             }
             Event::UserEvent(AppEvent::OpenFiles(paths)) => {
+                if should_handle_startup_open_with_files(
+                    startup_open_state,
+                    !clients.is_empty(),
+                    kakoune_session.is_some(),
+                ) {
+                    let open_args = startup_args(&args, &paths);
+                    match create_startup_client_window(
+                        elwt,
+                        &open_args,
+                        proxy.clone(),
+                        &config,
+                        window_icon.clone(),
+                        client_close_socket.as_deref(),
+                    ) {
+                        Ok(mut client) => {
+                            let session =
+                                resolve_kakoune_session(&open_args.kak_args, client.child.id());
+                            client.session = session.clone();
+                            kakoune_session = Some(session);
+                            clients.insert(client.window_id(), client);
+                            startup_open_state = StartupOpenState::StartupOpenHandled;
+                        }
+                        Err(error) => {
+                            log_error(format!("startup open window creation failed: {error:#}"))
+                        }
+                    }
+                    return;
+                }
                 if should_ignore_startup_open_files(&mut pending_startup_open_files, &paths) {
                     return;
                 }
+                let Some(session) = kakoune_session.as_deref() else {
+                    log_error("open file requested before startup session was ready".to_string());
+                    return;
+                };
                 RuntimeContext {
                     elwt,
                     clients: &mut clients,
@@ -594,12 +668,16 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     config: &config,
                     window_icon: window_icon.clone(),
                     kak_bin: &kak_bin,
-                    kakoune_session: &kakoune_session,
+                    kakoune_session: session,
                     client_close_socket: client_close_socket.as_deref(),
                 }
-                .open_session_window(&kakoune_session, &paths, "open file");
+                .open_session_window(session, &paths, "open file");
             }
             Event::UserEvent(AppEvent::Command(command)) => {
+                let Some(session) = kakoune_session.as_deref() else {
+                    log_error("command requested before startup session was ready".to_string());
+                    return;
+                };
                 RuntimeContext {
                     elwt,
                     clients: &mut clients,
@@ -607,10 +685,40 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     config: &config,
                     window_icon: window_icon.clone(),
                     kak_bin: &kak_bin,
-                    kakoune_session: &kakoune_session,
+                    kakoune_session: session,
                     client_close_socket: client_close_socket.as_deref(),
                 }
                 .handle_command(command, None);
+            }
+            Event::AboutToWait => {
+                if should_create_fallback_startup_client(
+                    startup_open_state,
+                    !clients.is_empty(),
+                    kakoune_session.is_some(),
+                ) {
+                    let open_args = startup_args(&args, &[]);
+                    match create_startup_client_window(
+                        elwt,
+                        &open_args,
+                        proxy.clone(),
+                        &config,
+                        window_icon.clone(),
+                        client_close_socket.as_deref(),
+                    ) {
+                        Ok(mut client) => {
+                            let session =
+                                resolve_kakoune_session(&open_args.kak_args, client.child.id());
+                            client.session = session.clone();
+                            kakoune_session = Some(session);
+                            clients.insert(client.window_id(), client);
+                            startup_open_state = StartupOpenState::NoPendingStartupOpen;
+                        }
+                        Err(error) => {
+                            log_error(format!("startup window creation failed: {error:#}"));
+                            elwt.exit();
+                        }
+                    }
+                }
             }
             Event::WindowEvent { window_id, event } => {
                 let mut remove_client = false;
@@ -718,17 +826,24 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     }
                 }
                 if let Some(command) = pending_command {
-                    RuntimeContext {
-                        elwt,
-                        clients: &mut clients,
-                        proxy: proxy.clone(),
-                        config: &config,
-                        window_icon: window_icon.clone(),
-                        kak_bin: &kak_bin,
-                        kakoune_session: &kakoune_session,
-                        client_close_socket: client_close_socket.as_deref(),
+                    if let Some(session) = kakoune_session.as_deref() {
+                        RuntimeContext {
+                            elwt,
+                            clients: &mut clients,
+                            proxy: proxy.clone(),
+                            config: &config,
+                            window_icon: window_icon.clone(),
+                            kak_bin: &kak_bin,
+                            kakoune_session: session,
+                            client_close_socket: client_close_socket.as_deref(),
+                        }
+                        .handle_command(command, Some(window_id));
+                    } else {
+                        log_error(
+                            "window command requested before startup session was ready"
+                                .to_string(),
+                        );
                     }
-                    .handle_command(command, Some(window_id));
                 } else if remove_client {
                     clients.remove(&window_id);
                     if clients.is_empty() {
@@ -874,10 +989,12 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        KakvideHookInstallState, client_name_from_ui_options, connected_kakoune_args,
-        default_launch_directory, extract_kak_bin, kakvide_hook_prompt_keys,
-        resolve_kakoune_session, should_ignore_startup_open_files, should_show_combined_help,
-        should_update_native_window_title, startup_open_files,
+        KakvideHookInstallState, StartupOpenState, client_name_from_ui_options,
+        connected_kakoune_args, default_launch_directory, extract_kak_bin,
+        kakvide_hook_prompt_keys, resolve_kakoune_session, should_create_fallback_startup_client,
+        should_handle_startup_open_with_files, should_ignore_startup_open_files,
+        should_show_combined_help, should_update_native_window_title, startup_open_files,
+        startup_open_state_for_launch,
     };
     use crate::app::AppConfig;
 
@@ -1070,6 +1187,51 @@ mod tests {
         assert!(!should_ignore_startup_open_files(
             &mut pending,
             &[PathBuf::from("file.txt")]
+        ));
+    }
+
+    #[test]
+    fn startup_open_state_waits_for_open_files_on_macos_without_args() {
+        assert_eq!(
+            startup_open_state_for_launch(true, &[]),
+            StartupOpenState::WaitingForStartupOpenFiles
+        );
+        assert_eq!(
+            startup_open_state_for_launch(true, &[OsString::from("file.txt")]),
+            StartupOpenState::NoPendingStartupOpen
+        );
+    }
+
+    #[test]
+    fn startup_open_is_handled_only_while_waiting_and_uninitialized() {
+        assert!(should_handle_startup_open_with_files(
+            StartupOpenState::WaitingForStartupOpenFiles,
+            false,
+            false
+        ));
+        assert!(!should_handle_startup_open_with_files(
+            StartupOpenState::NoPendingStartupOpen,
+            false,
+            false
+        ));
+        assert!(!should_handle_startup_open_with_files(
+            StartupOpenState::WaitingForStartupOpenFiles,
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn fallback_startup_client_is_skipped_after_startup_open_is_handled() {
+        assert!(!should_create_fallback_startup_client(
+            StartupOpenState::StartupOpenHandled,
+            false,
+            false
+        ));
+        assert!(should_create_fallback_startup_client(
+            StartupOpenState::NoPendingStartupOpen,
+            false,
+            false
         ));
     }
 
