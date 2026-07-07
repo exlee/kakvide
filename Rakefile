@@ -2,6 +2,9 @@ require "fileutils"
 require "shellwords"
 require "tmpdir"
 
+ICON_SOURCE = "assets/kakvide.png"
+ICON_OUTPUT = "target/generated/kakvide.icns"
+
 task :clean_app do
 	sh "rm -fr /Applications/Kakvide.app 2>/dev/null || true"
 end
@@ -14,7 +17,7 @@ task :install => [:clean_app, :bundle, :install_copy, :register] do
 
 end
 
-task :bundle => [:build_release] do
+task :bundle => [ICON_OUTPUT, :build_release] do
 	sh "cargo bundle --release --format osx"
 end
 
@@ -31,9 +34,9 @@ task :unregister_target do
   sh "/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -u target/release/bundle/osx/Kakvide.app 2>/dev/null || true"
 end
 
-task :icon do
-  source = "assets/kakvide.png"
-  output = ENV.fetch("ICON_OUTPUT", "target/generated/kakvide.icns")
+task :icon => [ICON_OUTPUT]
+
+file ICON_OUTPUT => [ICON_SOURCE] do
   magick = `command -v magick`.strip
 
   abort "ImageMagick is required to build icons (`brew install imagemagick`)." if magick.empty?
@@ -57,7 +60,7 @@ task :icon do
       sharpness = size <= 32 ? "0x0.75+1.8+0.01" : "0x0.55+1.1+0.01"
       sh [
         magick.shellescape,
-        source.shellescape,
+        ICON_SOURCE.shellescape,
         "-filter LanczosSharp",
         "-define filter:blur=0.70",
         "-resize #{size}x#{size}",
@@ -75,11 +78,11 @@ task :icon do
     body = chunks.join
     File.binwrite(generated, "icns" + [body.bytesize + 8].pack("N") + body)
 
-    if File.exist?(output) && FileUtils.compare_file(generated, output)
-      puts "#{output} is up to date"
+    if File.exist?(ICON_OUTPUT) && FileUtils.compare_file(generated, ICON_OUTPUT)
+      puts "#{ICON_OUTPUT} is up to date"
     else
-      FileUtils.mkdir_p(File.dirname(output))
-      FileUtils.cp(generated, output)
+      FileUtils.mkdir_p(File.dirname(ICON_OUTPUT))
+      FileUtils.cp(generated, ICON_OUTPUT)
     end
   end
 end
