@@ -225,7 +225,7 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     !clients.is_empty(),
                     kakoune_session.is_some(),
                 ) {
-                    let open_args = startup_args(&args, &paths);
+                    let open_args = startup_args(&args, &config, &paths);
                     match create_startup_client_window(
                         elwt,
                         &open_args,
@@ -298,7 +298,7 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                     !clients.is_empty(),
                     kakoune_session.is_some(),
                 ) {
-                    let open_args = startup_args(&args, &[]);
+                    let open_args = startup_args(&args, &config, &[]);
                     match create_startup_client_window(
                         elwt,
                         &open_args,

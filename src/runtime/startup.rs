@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::path::PathBuf;
 
-use crate::app::Args;
+use crate::app::{AppConfig, Args};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StartupOpenState {
@@ -10,19 +10,30 @@ pub enum StartupOpenState {
     StartupOpenHandled,
 }
 
-pub fn startup_args(base_args: &Args, paths: &[PathBuf]) -> Args {
-    if paths.is_empty() {
-        return base_args.clone();
-    }
+pub fn startup_args(base_args: &Args, config: &AppConfig, paths: &[PathBuf]) -> Args {
+    let kak_args = if paths.is_empty() {
+        base_args.kak_args.clone()
+    } else {
+        paths.iter()
+            .map(|path| path.as_os_str().to_os_string())
+            .collect()
+    };
 
     Args {
         show_config: base_args.show_config,
         kak_bin: base_args.kak_bin.clone(),
-        kak_args: paths
-            .iter()
-            .map(|path| path.as_os_str().to_os_string())
-            .collect(),
+        kak_args: startup_kak_args(config, kak_args),
     }
+}
+
+fn startup_kak_args(config: &AppConfig, kak_args: Vec<OsString>) -> Vec<OsString> {
+    if !config.single_session || explicit_kakoune_session(&kak_args).is_some() {
+        return kak_args;
+    }
+
+    let mut effective_args = vec![OsString::from("-C"), OsString::from(&config.session_name)];
+    effective_args.extend(kak_args);
+    effective_args
 }
 
 pub fn startup_open_state_for_launch(is_macos: bool, kak_args: &[OsString]) -> StartupOpenState {
@@ -162,6 +173,85 @@ mod tests {
                 12345,
             ),
             OsString::from("maybe-work")
+        );
+    }
+
+    #[test]
+    fn startup_args_enable_single_session_for_fresh_launch() {
+        let base_args = Args {
+            show_config: false,
+            kak_bin: "kak".to_string(),
+            kak_args: vec![OsString::from("file.txt")],
+        };
+        let config = AppConfig {
+            single_session: true,
+            session_name: "shared".to_string(),
+            ..AppConfig::default()
+        };
+
+        let args = startup_args(&base_args, &config, &[]);
+
+        assert_eq!(
+            args.kak_args,
+            vec![
+                OsString::from("-C"),
+                OsString::from("shared"),
+                OsString::from("file.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_args_use_single_session_for_startup_open_files() {
+        let base_args = Args {
+            show_config: false,
+            kak_bin: "kak".to_string(),
+            kak_args: Vec::new(),
+        };
+        let config = AppConfig {
+            single_session: true,
+            session_name: "shared".to_string(),
+            ..AppConfig::default()
+        };
+
+        let args = startup_args(&base_args, &config, &[PathBuf::from("file.txt")]);
+
+        assert_eq!(
+            args.kak_args,
+            vec![
+                OsString::from("-C"),
+                OsString::from("shared"),
+                OsString::from("file.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn startup_args_preserve_explicit_session_flags() {
+        let base_args = Args {
+            show_config: false,
+            kak_bin: "kak".to_string(),
+            kak_args: vec![
+                OsString::from("-c"),
+                OsString::from("manual"),
+                OsString::from("file.txt"),
+            ],
+        };
+        let config = AppConfig {
+            single_session: true,
+            session_name: "shared".to_string(),
+            ..AppConfig::default()
+        };
+
+        let args = startup_args(&base_args, &config, &[]);
+
+        assert_eq!(
+            args.kak_args,
+            vec![
+                OsString::from("-c"),
+                OsString::from("manual"),
+                OsString::from("file.txt"),
+            ]
         );
     }
 
