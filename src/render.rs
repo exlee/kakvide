@@ -22,7 +22,7 @@ use crate::face_resolution::{
     ResolvedFace, Rgba, UnderlineStyle, resolve_derived_face, resolve_root_face,
 };
 use crate::kakoune_messages::{Atom, Face};
-use crate::layout::{LayoutMetrics, PADDING, layout_metrics};
+use crate::layout::{LayoutMetrics, PADDING, bottom_overlay_top, layout_metrics};
 
 const FALLBACK_BG: Rgba = Rgba::rgb(0x1e, 0x1e, 0x2e);
 const FALLBACK_FG: Rgba = Rgba::rgb(0xdd, 0xdd, 0xdd);
@@ -34,7 +34,8 @@ pub struct Renderer {
     default_logical_font_size: f32,
     underline_offset: f32,
     logical_font_size: Cell<f32>,
-    metrics_cache: RefCell<Option<(u64, CellMetrics)>>,
+    content_metrics_cache: RefCell<Option<(u64, CellMetrics)>>,
+    fixed_metrics_cache: RefCell<Option<(u64, CellMetrics)>>,
 }
 
 #[derive(Clone)]
@@ -80,6 +81,7 @@ pub fn render(
     let width = size.width.max(1) as usize;
     let height = size.height.max(1) as usize;
     let metrics = renderer.metrics(window.scale_factor());
+    let title_metrics = renderer.title_metrics(window.scale_factor());
 
     let mut buffer = surface
         .buffer_mut()
@@ -104,6 +106,7 @@ pub fn render(
         canvas,
         state,
         &metrics,
+        &title_metrics,
         layout_metrics(
             width,
             height,
@@ -112,6 +115,7 @@ pub fn render(
             window.scale_factor(),
         ),
         width,
+        height,
         config.transparent_menubar,
     );
 
@@ -125,8 +129,10 @@ fn render_canvas(
     canvas: &Canvas,
     state: &AppState,
     metrics: &CellMetrics,
+    title_metrics: &CellMetrics,
     layout: LayoutMetrics,
     width: usize,
+    height: usize,
     transparent_menubar: bool,
 ) {
     let default_face = resolve_root_face(&state.grid.default_face, FALLBACK_FG, FALLBACK_BG);
@@ -135,7 +141,7 @@ fn render_canvas(
         canvas,
         &state.window_title,
         &state.grid.default_face,
-        metrics,
+        title_metrics,
         layout,
         width,
         transparent_menubar,
@@ -168,7 +174,7 @@ fn render_canvas(
     );
 
     if let Some(status) = &state.status {
-        render_status(canvas, rows, cols, status, metrics, layout.top_padding);
+        render_status(canvas, cols, status, metrics, height);
     }
 
     let menu_rect = state.menu.as_ref().and_then(|menu| {
@@ -179,6 +185,7 @@ fn render_canvas(
             content_rows,
             metrics,
             layout.top_padding,
+            height,
         )
     });
 
@@ -191,6 +198,7 @@ fn render_canvas(
             content_rows,
             metrics,
             layout.top_padding,
+            height,
         );
     }
 }
@@ -234,21 +242,13 @@ fn render_window_title(
 
 fn render_status(
     canvas: &Canvas,
-    total_rows: usize,
     cols: usize,
     status: &StatusState,
     metrics: &CellMetrics,
-    top_padding: usize,
+    window_height: usize,
 ) {
-    let row = total_rows.saturating_sub(1);
-    fill_line_background(
-        canvas,
-        row,
-        cols,
-        &status.default_face,
-        metrics,
-        top_padding,
-    );
+    let top = bottom_overlay_top(window_height, metrics.cell_height, 1);
+    fill_line_background_at_top(canvas, cols, &status.default_face, metrics, top);
 
     let mut prompt_line = status.prompt.clone();
     prompt_line.extend(status.content.clone());
@@ -262,32 +262,32 @@ fn render_status(
     };
 
     if !prompt_line.is_empty() {
-        render_line_at(
+        render_line_at_top(
             canvas,
             LineRenderPosition {
-                row,
+                row: 0,
                 start_column: 0,
                 max_columns: prompt_limit,
             },
             &prompt_line,
             &status.default_face,
             metrics,
-            top_padding,
+            top,
         );
     }
 
     if !status.mode_line.is_empty() {
-        render_line_at(
+        render_line_at_top(
             canvas,
             LineRenderPosition {
-                row,
+                row: 0,
                 start_column: right_start,
                 max_columns: cols,
             },
             &status.mode_line,
             &status.default_face,
             metrics,
-            top_padding,
+            top,
         );
     }
 }
@@ -323,7 +323,18 @@ pub(in crate::render) fn render_line_at(
     metrics: &CellMetrics,
     top_padding: usize,
 ) {
-    let top = top_padding + position.row * metrics.cell_height;
+    let top = row_top(position.row, metrics, top_padding);
+    render_line_at_top(canvas, position, line, default_face, metrics, top);
+}
+
+pub(in crate::render) fn render_line_at_top(
+    canvas: &Canvas,
+    position: LineRenderPosition,
+    line: &[Atom],
+    default_face: &Face,
+    metrics: &CellMetrics,
+    top: usize,
+) {
     let mut column = position.start_column;
     let mut bg_paint = Paint::default();
     bg_paint.set_anti_alias(false);
@@ -391,7 +402,7 @@ fn render_grid_cursor(
     });
 
     let resolved = resolve_derived_face(&grid.default_face, &cell.face, FALLBACK_FG, FALLBACK_BG);
-    let top = top_padding + cursor.line * metrics.cell_height;
+    let top = row_top(cursor.line, metrics, top_padding);
 
     let mut bg_paint = Paint::default();
     bg_paint
@@ -453,27 +464,19 @@ pub fn line_display_width(line: &[Atom]) -> usize {
         .sum()
 }
 
-fn fill_line_background(
+pub(in crate::render) fn fill_line_background_at_top(
     canvas: &Canvas,
-    row: usize,
     cols: usize,
     default_face: &Face,
     metrics: &CellMetrics,
-    top_padding: usize,
+    top: usize,
 ) {
     let bg = resolve_root_face(default_face, FALLBACK_FG, FALLBACK_BG)
         .bg
         .to_color();
     let mut paint = Paint::default();
     paint.set_anti_alias(false).set_color(bg);
-    fill_cells(
-        canvas,
-        0,
-        top_padding + row * metrics.cell_height,
-        cols,
-        metrics,
-        &paint,
-    );
+    fill_cells(canvas, 0, top, cols, metrics, &paint);
 }
 
 pub(in crate::render) fn fill_line_segment(
@@ -485,19 +488,30 @@ pub(in crate::render) fn fill_line_segment(
     metrics: &CellMetrics,
     top_padding: usize,
 ) {
+    fill_line_segment_at_top(
+        canvas,
+        column,
+        width,
+        face,
+        metrics,
+        row_top(row, metrics, top_padding),
+    );
+}
+
+pub(in crate::render) fn fill_line_segment_at_top(
+    canvas: &Canvas,
+    column: usize,
+    width: usize,
+    face: &Face,
+    metrics: &CellMetrics,
+    top: usize,
+) {
     let bg = resolve_root_face(face, FALLBACK_FG, FALLBACK_BG)
         .bg
         .to_color();
     let mut paint = Paint::default();
     paint.set_anti_alias(false).set_color(bg);
-    fill_cells(
-        canvas,
-        column,
-        top_padding + row * metrics.cell_height,
-        width,
-        metrics,
-        &paint,
-    );
+    fill_cells(canvas, column, top, width, metrics, &paint);
 }
 
 pub(in crate::render) fn fill_rect(
@@ -507,15 +521,30 @@ pub(in crate::render) fn fill_rect(
     metrics: &CellMetrics,
     top_padding: usize,
 ) {
+    fill_rect_at_top(
+        canvas,
+        rect,
+        face,
+        metrics,
+        row_top(rect.row, metrics, top_padding),
+    );
+}
+
+pub(in crate::render) fn fill_rect_at_top(
+    canvas: &Canvas,
+    rect: popup::CellRect,
+    face: &Face,
+    metrics: &CellMetrics,
+    top: usize,
+) {
     for row in rect.row..rect.row + rect.height {
-        fill_line_segment(
+        fill_line_segment_at_top(
             canvas,
-            row,
             rect.column,
             rect.width,
             face,
             metrics,
-            top_padding,
+            top + (row - rect.row) * metrics.cell_height,
         );
     }
 }
@@ -577,22 +606,48 @@ pub(in crate::render) fn render_string_line(
         return;
     }
 
+    render_string_line_at_top(
+        canvas,
+        column,
+        text,
+        default_face,
+        metrics,
+        row_top(row, metrics, top_padding),
+    );
+}
+
+pub(in crate::render) fn render_string_line_at_top(
+    canvas: &Canvas,
+    column: usize,
+    text: &str,
+    default_face: &Face,
+    metrics: &CellMetrics,
+    top: usize,
+) {
+    if text.is_empty() {
+        return;
+    }
+
     let atoms = [Atom {
         face: Face::default(),
         contents: text.to_string(),
     }];
-    render_line_at(
+    render_line_at_top(
         canvas,
         LineRenderPosition {
-            row,
+            row: 0,
             start_column: column,
             max_columns: column + atom_display_width(text),
         },
         &atoms,
         default_face,
         metrics,
-        top_padding,
+        top,
     );
+}
+
+fn row_top(row: usize, metrics: &CellMetrics, top_padding: usize) -> usize {
+    top_padding + row * metrics.cell_height
 }
 
 fn fill_cells(
@@ -792,7 +847,8 @@ pub fn load_renderer(config: &AppConfig) -> Renderer {
         default_logical_font_size: config.font_size,
         underline_offset: config.cell.underline_offset,
         logical_font_size: Cell::new(config.font_size),
-        metrics_cache: RefCell::new(None),
+        content_metrics_cache: RefCell::new(None),
+        fixed_metrics_cache: RefCell::new(None),
     }
 }
 
@@ -804,7 +860,8 @@ impl Renderer {
         self.underline_offset = config.cell.underline_offset;
         self.logical_font_size
             .set((config.font_size + font_size_delta).max(6.0));
-        self.metrics_cache.borrow_mut().take();
+        self.content_metrics_cache.borrow_mut().take();
+        self.fixed_metrics_cache.borrow_mut().take();
     }
 
     pub fn adjust_font_size(&self, delta: f32) -> bool {
@@ -816,7 +873,7 @@ impl Renderer {
         }
 
         self.logical_font_size.set(next);
-        self.metrics_cache.borrow_mut().take();
+        self.content_metrics_cache.borrow_mut().take();
         true
     }
 
@@ -826,19 +883,40 @@ impl Renderer {
         }
 
         self.logical_font_size.set(self.default_logical_font_size);
-        self.metrics_cache.borrow_mut().take();
+        self.content_metrics_cache.borrow_mut().take();
         true
     }
 
     pub fn metrics(&self, scale_factor: f64) -> CellMetrics {
+        self.metrics_for_logical_font_size(
+            scale_factor,
+            self.logical_font_size.get(),
+            &self.content_metrics_cache,
+        )
+    }
+
+    pub fn title_metrics(&self, scale_factor: f64) -> CellMetrics {
+        self.metrics_for_logical_font_size(
+            scale_factor,
+            self.default_logical_font_size,
+            &self.fixed_metrics_cache,
+        )
+    }
+
+    fn metrics_for_logical_font_size(
+        &self,
+        scale_factor: f64,
+        logical_font_size: f32,
+        cache: &RefCell<Option<(u64, CellMetrics)>>,
+    ) -> CellMetrics {
         let cache_key = scale_factor.to_bits();
-        if let Some((cached_key, metrics)) = self.metrics_cache.borrow().as_ref()
+        if let Some((cached_key, metrics)) = cache.borrow().as_ref()
             && *cached_key == cache_key
         {
             return metrics.clone();
         }
 
-        let physical_font_size = (self.logical_font_size.get() as f64 * scale_factor) as f32;
+        let physical_font_size = (logical_font_size as f64 * scale_factor) as f32;
         let typeface = preferred_typeface(&self.font_mgr, &self.preferred_font_family)
             .unwrap_or_else(|| {
                 self.font_mgr
@@ -869,9 +947,7 @@ impl Renderer {
             font_mgr: self.font_mgr.clone(),
             fallback_fonts: Rc::new(RefCell::new(HashMap::new())),
         };
-        self.metrics_cache
-            .borrow_mut()
-            .replace((cache_key, metrics.clone()));
+        cache.borrow_mut().replace((cache_key, metrics.clone()));
         metrics
     }
 }
@@ -968,6 +1044,26 @@ mod tests {
 
         assert_eq!(title, "kakvide - /t");
         assert_eq!(atom_display_width(&title), 12);
+    }
+
+    #[test]
+    fn title_metrics_stay_at_default_size_when_content_font_changes() {
+        let mut config = AppConfig::default();
+        config.font_size = 12.0;
+        let renderer = load_renderer(&config);
+
+        let original_title_metrics = renderer.title_metrics(1.0);
+        assert!(renderer.adjust_font_size(4.0));
+
+        let zoomed_metrics = renderer.metrics(1.0);
+        let title_metrics = renderer.title_metrics(1.0);
+
+        assert!(zoomed_metrics.cell_height >= original_title_metrics.cell_height);
+        assert_eq!(
+            title_metrics.cell_height,
+            original_title_metrics.cell_height
+        );
+        assert_eq!(title_metrics.cell_width, original_title_metrics.cell_width);
     }
 
     #[test]

@@ -2,9 +2,11 @@ use skia_safe::Canvas;
 
 use crate::app::{InfoState, MenuState};
 use crate::kakoune_messages::{InfoStyle, MenuStyle};
+use crate::layout::bottom_overlay_top;
 use crate::render::{
-    CellMetrics, LineRenderPosition, fill_line_segment, fill_rect, line_display_width,
-    render_line_at, render_string_line, truncate_atoms,
+    CellMetrics, LineRenderPosition, fill_line_segment, fill_line_segment_at_top, fill_rect,
+    fill_rect_at_top, line_display_width, render_line_at, render_line_at_top, render_string_line,
+    render_string_line_at_top, truncate_atoms,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,12 +20,19 @@ pub(super) struct CellRect {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct MenuLayout {
     rect: CellRect,
+    top: usize,
     visible_columns: usize,
     total_columns: usize,
     rows_per_column: usize,
     column_width: usize,
     first_visible_item: usize,
     is_single_row: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct PopupRect {
+    pub rect: CellRect,
+    pub top: usize,
 }
 
 pub(super) fn render_menu(
@@ -33,13 +42,18 @@ pub(super) fn render_menu(
     rows: usize,
     metrics: &CellMetrics,
     top_padding: usize,
-) -> Option<CellRect> {
+    window_height: usize,
+) -> Option<PopupRect> {
     if cols == 0 || rows == 0 || menu.items.is_empty() {
         return None;
     }
 
-    let layout = menu_layout(menu, cols, rows)?;
-    fill_rect(canvas, layout.rect, &menu.menu_face, metrics, top_padding);
+    let layout = menu_layout(menu, cols, rows, window_height, metrics.cell_height)?;
+    if matches!(menu.style, MenuStyle::Inline) {
+        fill_rect(canvas, layout.rect, &menu.menu_face, metrics, top_padding);
+    } else {
+        fill_rect_at_top(canvas, layout.rect, &menu.menu_face, metrics, layout.top);
+    }
 
     if layout.is_single_row {
         render_single_row_menu(canvas, menu, layout, metrics, top_padding);
@@ -49,10 +63,19 @@ pub(super) fn render_menu(
         render_multi_column_menu(canvas, menu, layout, metrics, top_padding);
     }
 
-    Some(layout.rect)
+    Some(PopupRect {
+        rect: layout.rect,
+        top: layout.top,
+    })
 }
 
-fn menu_layout(menu: &MenuState, cols: usize, rows: usize) -> Option<MenuLayout> {
+fn menu_layout(
+    menu: &MenuState,
+    cols: usize,
+    rows: usize,
+    window_height: usize,
+    cell_height: usize,
+) -> Option<MenuLayout> {
     let item_count = menu.items.len();
     let longest = menu
         .items
@@ -69,7 +92,10 @@ fn menu_layout(menu: &MenuState, cols: usize, rows: usize) -> Option<MenuLayout>
     match menu.style {
         MenuStyle::Inline => {
             let width = longest.saturating_add(1).min(cols);
-            let height = item_count.max(1).min(rows).min(10);
+            let max_height = rows
+                .min(10)
+                .min(anchor_line.max(rows.saturating_sub(anchor_line).saturating_sub(1)));
+            let height = item_count.max(1).min(max_height);
             if width == 0 || height == 0 {
                 return None;
             }
@@ -81,6 +107,7 @@ fn menu_layout(menu: &MenuState, cols: usize, rows: usize) -> Option<MenuLayout>
                     width,
                     height,
                 },
+                top: 0,
                 visible_columns: 1,
                 total_columns: item_count.div_ceil(height.max(1)),
                 rows_per_column: height,
@@ -102,6 +129,7 @@ fn menu_layout(menu: &MenuState, cols: usize, rows: usize) -> Option<MenuLayout>
                     width,
                     height: 1,
                 },
+                top: bottom_overlay_top(window_height, cell_height, 1),
                 visible_columns: 0,
                 total_columns: item_count,
                 rows_per_column: 1,
@@ -136,6 +164,7 @@ fn menu_layout(menu: &MenuState, cols: usize, rows: usize) -> Option<MenuLayout>
                     width: cols,
                     height,
                 },
+                top: bottom_overlay_top(window_height, cell_height, height + 1),
                 visible_columns,
                 total_columns,
                 rows_per_column: height,
@@ -200,33 +229,58 @@ fn render_single_column_menu(
     metrics: &CellMetrics,
     top_padding: usize,
 ) {
+    let inline = layout.top == 0;
     for (index, item) in menu.items.iter().take(layout.rect.height).enumerate() {
         let face = if menu.selected == Some(index) {
             &menu.selected_face
         } else {
             &menu.menu_face
         };
-        fill_line_segment(
-            canvas,
-            layout.rect.row + index,
-            layout.rect.column,
-            layout.rect.width,
-            face,
-            metrics,
-            top_padding,
-        );
-        render_line_at(
-            canvas,
-            LineRenderPosition {
-                row: layout.rect.row + index,
-                start_column: layout.rect.column,
-                max_columns: layout.rect.column + layout.rect.width,
-            },
-            item,
-            face,
-            metrics,
-            top_padding,
-        );
+        let row_top = layout.top + index * metrics.cell_height;
+        if inline {
+            fill_line_segment(
+                canvas,
+                layout.rect.row + index,
+                layout.rect.column,
+                layout.rect.width,
+                face,
+                metrics,
+                top_padding,
+            );
+            render_line_at(
+                canvas,
+                LineRenderPosition {
+                    row: layout.rect.row + index,
+                    start_column: layout.rect.column,
+                    max_columns: layout.rect.column + layout.rect.width,
+                },
+                item,
+                face,
+                metrics,
+                top_padding,
+            );
+        } else {
+            fill_line_segment_at_top(
+                canvas,
+                layout.rect.column,
+                layout.rect.width,
+                face,
+                metrics,
+                row_top,
+            );
+            render_line_at_top(
+                canvas,
+                LineRenderPosition {
+                    row: 0,
+                    start_column: layout.rect.column,
+                    max_columns: layout.rect.column + layout.rect.width,
+                },
+                item,
+                face,
+                metrics,
+                row_top,
+            );
+        }
     }
 }
 
@@ -237,19 +291,23 @@ fn render_single_row_menu(
     metrics: &CellMetrics,
     top_padding: usize,
 ) {
-    let row = layout.rect.row;
     let mut column = layout.rect.column;
+    let inline = layout.top == 0;
 
     if layout.first_visible_item > 0 {
-        render_string_line(
-            canvas,
-            row,
-            column,
-            "< ",
-            &menu.menu_face,
-            metrics,
-            top_padding,
-        );
+        if inline {
+            render_string_line(
+                canvas,
+                layout.rect.row,
+                column,
+                "< ",
+                &menu.menu_face,
+                metrics,
+                top_padding,
+            );
+        } else {
+            render_string_line_at_top(canvas, column, "< ", &menu.menu_face, metrics, layout.top);
+        }
     }
     column += 2;
 
@@ -269,58 +327,106 @@ fn render_single_row_menu(
         } else {
             item.clone()
         };
-        render_line_at(
-            canvas,
-            LineRenderPosition {
-                row,
-                start_column: column,
-                max_columns: end_column,
-            },
-            &truncated,
-            face,
-            metrics,
-            top_padding,
-        );
-
-        if item_width > available_width {
-            render_string_line(
+        if inline {
+            render_line_at(
                 canvas,
-                row,
-                end_column,
-                "…",
-                &menu.menu_face,
+                LineRenderPosition {
+                    row: layout.rect.row,
+                    start_column: column,
+                    max_columns: end_column,
+                },
+                &truncated,
+                face,
                 metrics,
                 top_padding,
             );
+        } else {
+            render_line_at_top(
+                canvas,
+                LineRenderPosition {
+                    row: 0,
+                    start_column: column,
+                    max_columns: end_column,
+                },
+                &truncated,
+                face,
+                metrics,
+                layout.top,
+            );
+        }
+
+        if item_width > available_width {
+            if inline {
+                render_string_line(
+                    canvas,
+                    layout.rect.row,
+                    end_column,
+                    "…",
+                    &menu.menu_face,
+                    metrics,
+                    top_padding,
+                );
+            } else {
+                render_string_line_at_top(
+                    canvas,
+                    end_column,
+                    "…",
+                    &menu.menu_face,
+                    metrics,
+                    layout.top,
+                );
+            }
             break;
         }
 
         column += item_width;
         if column < end_column {
-            render_string_line(
-                canvas,
-                row,
-                column,
-                " ",
-                &menu.menu_face,
-                metrics,
-                top_padding,
-            );
+            if inline {
+                render_string_line(
+                    canvas,
+                    layout.rect.row,
+                    column,
+                    " ",
+                    &menu.menu_face,
+                    metrics,
+                    top_padding,
+                );
+            } else {
+                render_string_line_at_top(
+                    canvas,
+                    column,
+                    " ",
+                    &menu.menu_face,
+                    metrics,
+                    layout.top,
+                );
+            }
             column += 1;
         }
         index += 1;
     }
 
     if index < menu.items.len() {
-        render_string_line(
-            canvas,
-            row,
-            layout.rect.column + layout.rect.width.saturating_sub(1),
-            ">",
-            &menu.menu_face,
-            metrics,
-            top_padding,
-        );
+        if inline {
+            render_string_line(
+                canvas,
+                layout.rect.row,
+                layout.rect.column + layout.rect.width.saturating_sub(1),
+                ">",
+                &menu.menu_face,
+                metrics,
+                top_padding,
+            );
+        } else {
+            render_string_line_at_top(
+                canvas,
+                layout.rect.column + layout.rect.width.saturating_sub(1),
+                ">",
+                &menu.menu_face,
+                metrics,
+                layout.top,
+            );
+        }
     }
 }
 
@@ -348,9 +454,11 @@ fn render_multi_column_menu(
     } else {
         0
     };
+    let inline = layout.top == 0;
 
     for row_offset in 0..layout.rect.height {
         let row = layout.rect.row + row_offset;
+        let row_top = layout.top + row_offset * metrics.cell_height;
         for col_offset in 0..layout.visible_columns {
             let column_index = layout.first_visible_item + col_offset;
             if column_index >= layout.total_columns {
@@ -364,30 +472,56 @@ fn render_multi_column_menu(
                 &menu.menu_face
             };
             let start_column = layout.rect.column + col_offset * layout.column_width;
-            fill_line_segment(
-                canvas,
-                row,
-                start_column,
-                layout.column_width,
-                face,
-                metrics,
-                top_padding,
-            );
-
-            if let Some(item) = menu.items.get(item_index) {
-                let truncated = truncate_atoms(item, layout.column_width.saturating_sub(1));
-                render_line_at(
+            if inline {
+                fill_line_segment(
                     canvas,
-                    LineRenderPosition {
-                        row,
-                        start_column,
-                        max_columns: start_column + layout.column_width,
-                    },
-                    &truncated,
+                    row,
+                    start_column,
+                    layout.column_width,
                     face,
                     metrics,
                     top_padding,
                 );
+            } else {
+                fill_line_segment_at_top(
+                    canvas,
+                    start_column,
+                    layout.column_width,
+                    face,
+                    metrics,
+                    row_top,
+                );
+            }
+
+            if let Some(item) = menu.items.get(item_index) {
+                let truncated = truncate_atoms(item, layout.column_width.saturating_sub(1));
+                if inline {
+                    render_line_at(
+                        canvas,
+                        LineRenderPosition {
+                            row,
+                            start_column,
+                            max_columns: start_column + layout.column_width,
+                        },
+                        &truncated,
+                        face,
+                        metrics,
+                        top_padding,
+                    );
+                } else {
+                    render_line_at_top(
+                        canvas,
+                        LineRenderPosition {
+                            row: 0,
+                            start_column,
+                            max_columns: start_column + layout.column_width,
+                        },
+                        &truncated,
+                        face,
+                        metrics,
+                        row_top,
+                    );
+                }
             }
         }
 
@@ -397,26 +531,38 @@ fn render_multi_column_menu(
         } else {
             "░"
         };
-        render_string_line(
-            canvas,
-            row,
-            layout.rect.column + layout.rect.width.saturating_sub(1),
-            marker,
-            scrollbar_face,
-            metrics,
-            top_padding,
-        );
+        if inline {
+            render_string_line(
+                canvas,
+                row,
+                layout.rect.column + layout.rect.width.saturating_sub(1),
+                marker,
+                scrollbar_face,
+                metrics,
+                top_padding,
+            );
+        } else {
+            render_string_line_at_top(
+                canvas,
+                layout.rect.column + layout.rect.width.saturating_sub(1),
+                marker,
+                scrollbar_face,
+                metrics,
+                row_top,
+            );
+        }
     }
 }
 
 pub(super) fn render_info(
     canvas: &Canvas,
     info: &InfoState,
-    menu_rect: Option<CellRect>,
+    menu_rect: Option<PopupRect>,
     cols: usize,
     rows: usize,
     metrics: &CellMetrics,
     top_padding: usize,
+    window_height: usize,
 ) {
     if cols == 0 || rows == 0 {
         return;
@@ -438,36 +584,71 @@ pub(super) fn render_info(
         return;
     }
 
-    let rect = info_rect(info, menu_rect, cols, rows, width, height);
-    fill_rect(canvas, rect, &info.face, metrics, top_padding);
+    let layout = info_rect_with_window(
+        info,
+        menu_rect,
+        cols,
+        rows,
+        width,
+        height,
+        window_height,
+        metrics.cell_height,
+    );
+    if matches!(info.style, InfoStyle::Prompt) {
+        fill_rect_at_top(canvas, layout.rect, &info.face, metrics, layout.top);
+    } else {
+        fill_rect(canvas, layout.rect, &info.face, metrics, top_padding);
+    }
 
     if framed {
-        render_framed_info(canvas, info, rect, metrics, top_padding);
+        render_framed_info(canvas, info, layout, metrics, top_padding);
     } else {
-        for (index, line) in info.content.iter().take(rect.height).enumerate() {
-            render_line_at(
-                canvas,
-                LineRenderPosition {
-                    row: rect.row + index,
-                    start_column: rect.column,
-                    max_columns: rect.column + rect.width,
-                },
-                line,
-                &info.face,
-                metrics,
-                top_padding,
-            );
+        for (index, line) in info.content.iter().take(layout.rect.height).enumerate() {
+            if matches!(info.style, InfoStyle::Prompt) {
+                render_line_at_top(
+                    canvas,
+                    LineRenderPosition {
+                        row: 0,
+                        start_column: layout.rect.column,
+                        max_columns: layout.rect.column + layout.rect.width,
+                    },
+                    line,
+                    &info.face,
+                    metrics,
+                    layout.top + index * metrics.cell_height,
+                );
+            } else {
+                render_line_at(
+                    canvas,
+                    LineRenderPosition {
+                        row: layout.rect.row + index,
+                        start_column: layout.rect.column,
+                        max_columns: layout.rect.column + layout.rect.width,
+                    },
+                    line,
+                    &info.face,
+                    metrics,
+                    top_padding,
+                );
+            }
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InfoLayout {
+    rect: CellRect,
+    top: usize,
 }
 
 fn render_framed_info(
     canvas: &Canvas,
     info: &InfoState,
-    rect: CellRect,
+    layout: InfoLayout,
     metrics: &CellMetrics,
     top_padding: usize,
 ) {
+    let rect = layout.rect;
     if rect.width < 2 || rect.height < 2 {
         return;
     }
@@ -482,6 +663,72 @@ fn render_framed_info(
         let dash_width = inner_width.saturating_sub(title_width + 2);
         top.push_str(&"─".repeat(dash_width / 2));
         top.push('┤');
+        if matches!(info.style, InfoStyle::Prompt) {
+            render_string_line_at_top(canvas, rect.column, &top, &info.face, metrics, layout.top);
+            render_line_at_top(
+                canvas,
+                LineRenderPosition {
+                    row: 0,
+                    start_column: rect.column + top.chars().count(),
+                    max_columns: rect.column + rect.width,
+                },
+                &title,
+                &info.face,
+                metrics,
+                layout.top,
+            );
+        } else {
+            render_string_line(
+                canvas,
+                rect.row,
+                rect.column,
+                &top,
+                &info.face,
+                metrics,
+                top_padding,
+            );
+            render_line_at(
+                canvas,
+                LineRenderPosition {
+                    row: rect.row,
+                    start_column: rect.column + top.chars().count(),
+                    max_columns: rect.column + rect.width,
+                },
+                &title,
+                &info.face,
+                metrics,
+                top_padding,
+            );
+        }
+        let mut right = String::from("├");
+        right.push_str(&"─".repeat(dash_width - dash_width / 2));
+        right.push_str("─╮");
+        if matches!(info.style, InfoStyle::Prompt) {
+            render_string_line_at_top(
+                canvas,
+                rect.column + rect.width.saturating_sub(right.chars().count()),
+                &right,
+                &info.face,
+                metrics,
+                layout.top,
+            );
+        } else {
+            render_string_line(
+                canvas,
+                rect.row,
+                rect.column + rect.width.saturating_sub(right.chars().count()),
+                &right,
+                &info.face,
+                metrics,
+                top_padding,
+            );
+        }
+        return render_framed_info_body(canvas, info, layout, metrics, top_padding);
+    }
+    top.push_str("─╮");
+    if matches!(info.style, InfoStyle::Prompt) {
+        render_string_line_at_top(canvas, rect.column, &top, &info.face, metrics, layout.top);
+    } else {
         render_string_line(
             canvas,
             rect.row,
@@ -491,152 +738,175 @@ fn render_framed_info(
             metrics,
             top_padding,
         );
-        render_line_at(
-            canvas,
-            LineRenderPosition {
-                row: rect.row,
-                start_column: rect.column + top.chars().count(),
-                max_columns: rect.column + rect.width,
-            },
-            &title,
-            &info.face,
-            metrics,
-            top_padding,
-        );
-        let mut right = String::from("├");
-        right.push_str(&"─".repeat(dash_width - dash_width / 2));
-        right.push_str("─╮");
-        render_string_line(
-            canvas,
-            rect.row,
-            rect.column + rect.width.saturating_sub(right.chars().count()),
-            &right,
-            &info.face,
-            metrics,
-            top_padding,
-        );
-        return render_framed_info_body(canvas, info, rect, metrics, top_padding);
     }
-    top.push_str("─╮");
-    render_string_line(
-        canvas,
-        rect.row,
-        rect.column,
-        &top,
-        &info.face,
-        metrics,
-        top_padding,
-    );
-    render_framed_info_body(canvas, info, rect, metrics, top_padding);
+    render_framed_info_body(canvas, info, layout, metrics, top_padding);
 }
 
 fn render_framed_info_body(
     canvas: &Canvas,
     info: &InfoState,
-    rect: CellRect,
+    layout: InfoLayout,
     metrics: &CellMetrics,
     top_padding: usize,
 ) {
+    let rect = layout.rect;
     let inner_width = rect.width.saturating_sub(4);
     let body_rows = rect.height.saturating_sub(2);
     for row_offset in 0..body_rows {
         let row = rect.row + 1 + row_offset;
+        let row_top = layout.top + (row_offset + 1) * metrics.cell_height;
         if let Some(line) = info.content.get(row_offset) {
-            render_string_line(
-                canvas,
-                row,
-                rect.column,
-                "│ ",
-                &info.face,
-                metrics,
-                top_padding,
-            );
-            render_line_at(
-                canvas,
-                LineRenderPosition {
+            if matches!(info.style, InfoStyle::Prompt) {
+                render_string_line_at_top(canvas, rect.column, "│ ", &info.face, metrics, row_top);
+                render_line_at_top(
+                    canvas,
+                    LineRenderPosition {
+                        row: 0,
+                        start_column: rect.column + 2,
+                        max_columns: rect.column + 2 + inner_width,
+                    },
+                    line,
+                    &info.face,
+                    metrics,
+                    row_top,
+                );
+                render_string_line_at_top(
+                    canvas,
+                    rect.column + rect.width.saturating_sub(2),
+                    " │",
+                    &info.face,
+                    metrics,
+                    row_top,
+                );
+            } else {
+                render_string_line(
+                    canvas,
                     row,
-                    start_column: rect.column + 2,
-                    max_columns: rect.column + 2 + inner_width,
-                },
-                line,
-                &info.face,
-                metrics,
-                top_padding,
-            );
-            render_string_line(
-                canvas,
-                row,
-                rect.column + rect.width.saturating_sub(2),
-                " │",
-                &info.face,
-                metrics,
-                top_padding,
-            );
+                    rect.column,
+                    "│ ",
+                    &info.face,
+                    metrics,
+                    top_padding,
+                );
+                render_line_at(
+                    canvas,
+                    LineRenderPosition {
+                        row,
+                        start_column: rect.column + 2,
+                        max_columns: rect.column + 2 + inner_width,
+                    },
+                    line,
+                    &info.face,
+                    metrics,
+                    top_padding,
+                );
+                render_string_line(
+                    canvas,
+                    row,
+                    rect.column + rect.width.saturating_sub(2),
+                    " │",
+                    &info.face,
+                    metrics,
+                    top_padding,
+                );
+            }
         } else {
-            render_string_line(
-                canvas,
-                row,
-                rect.column,
-                &format!("│ {} │", " ".repeat(inner_width)),
-                &info.face,
-                metrics,
-                top_padding,
-            );
+            let blank = format!("│ {} │", " ".repeat(inner_width));
+            if matches!(info.style, InfoStyle::Prompt) {
+                render_string_line_at_top(
+                    canvas,
+                    rect.column,
+                    &blank,
+                    &info.face,
+                    metrics,
+                    row_top,
+                );
+            } else {
+                render_string_line(
+                    canvas,
+                    row,
+                    rect.column,
+                    &blank,
+                    &info.face,
+                    metrics,
+                    top_padding,
+                );
+            }
         }
     }
 
     let bottom = format!("╰─{}─╯", "─".repeat(inner_width));
-    render_string_line(
-        canvas,
-        rect.row + rect.height.saturating_sub(1),
-        rect.column,
-        &bottom,
-        &info.face,
-        metrics,
-        top_padding,
-    );
+    if matches!(info.style, InfoStyle::Prompt) {
+        render_string_line_at_top(
+            canvas,
+            rect.column,
+            &bottom,
+            &info.face,
+            metrics,
+            layout.top + rect.height.saturating_sub(1) * metrics.cell_height,
+        );
+    } else {
+        render_string_line(
+            canvas,
+            rect.row + rect.height.saturating_sub(1),
+            rect.column,
+            &bottom,
+            &info.face,
+            metrics,
+            top_padding,
+        );
+    }
 }
 
-fn info_rect(
+fn info_rect_with_window(
     info: &InfoState,
-    menu_rect: Option<CellRect>,
+    menu_rect: Option<PopupRect>,
     cols: usize,
     rows: usize,
     width: usize,
     height: usize,
-) -> CellRect {
+    window_height: usize,
+    cell_height: usize,
+) -> InfoLayout {
     match info.style {
-        InfoStyle::InlineAbove => CellRect {
-            row: info
-                .anchor
-                .line
-                .saturating_sub(height)
-                .min(rows.saturating_sub(height)),
-            column: info.anchor.column.min(cols.saturating_sub(width)),
-            width,
-            height,
-        },
-        InfoStyle::InlineBelow | InfoStyle::Inline => CellRect {
-            row: inline_popup_row(info.anchor.line, height, rows),
-            column: info.anchor.column.min(cols.saturating_sub(width)),
-            width,
-            height,
-        },
+        InfoStyle::InlineAbove => {
+            let rect = CellRect {
+                row: info
+                    .anchor
+                    .line
+                    .saturating_sub(height)
+                    .min(rows.saturating_sub(height)),
+                column: info.anchor.column.min(cols.saturating_sub(width)),
+                width,
+                height,
+            };
+            InfoLayout { rect, top: 0 }
+        }
+        InfoStyle::InlineBelow | InfoStyle::Inline => {
+            let rect = CellRect {
+                row: inline_popup_row(info.anchor.line, height, rows),
+                column: info.anchor.column.min(cols.saturating_sub(width)),
+                width,
+                height,
+            };
+            InfoLayout { rect, top: 0 }
+        }
         InfoStyle::MenuDoc => {
             if let Some(menu) = menu_rect {
-                let right_column = menu.column + menu.width;
-                let left_column = menu.column.saturating_sub(width);
-                let column = if right_column + width <= cols || right_column >= menu.column {
+                let right_column = menu.rect.column + menu.rect.width;
+                let left_column = menu.rect.column.saturating_sub(width);
+                let column = if right_column + width <= cols || right_column >= menu.rect.column {
                     right_column.min(cols.saturating_sub(width))
                 } else {
                     left_column
                 };
-                CellRect {
-                    row: menu.row.min(rows.saturating_sub(height)),
+                let rect = CellRect {
+                    row: menu.rect.row.min(rows.saturating_sub(height)),
                     column,
                     width,
                     height,
-                }
+                };
+                InfoLayout { rect, top: 0 }
             } else {
                 centered_rect(cols, rows, width, height)
             }
@@ -644,25 +914,30 @@ fn info_rect(
         InfoStyle::Modal => centered_rect(cols, rows, width, height),
         InfoStyle::Prompt => {
             let row = menu_rect
-                .map(|menu| menu.row.saturating_sub(height))
+                .map(|menu| menu.rect.row.saturating_sub(height))
                 .unwrap_or_else(|| rows.saturating_sub(height));
-            CellRect {
+            let top = menu_rect
+                .map(|menu| menu.top.saturating_sub(height * cell_height))
+                .unwrap_or_else(|| bottom_overlay_top(window_height, cell_height, height + 1));
+            let rect = CellRect {
                 row,
                 column: cols.saturating_sub(width),
                 width,
                 height,
-            }
+            };
+            InfoLayout { rect, top }
         }
     }
 }
 
-fn centered_rect(cols: usize, rows: usize, width: usize, height: usize) -> CellRect {
-    CellRect {
+fn centered_rect(cols: usize, rows: usize, width: usize, height: usize) -> InfoLayout {
+    let rect = CellRect {
         row: rows.saturating_sub(height) / 2,
         column: cols.saturating_sub(width) / 2,
         width,
         height,
-    }
+    };
+    InfoLayout { rect, top: 0 }
 }
 
 fn inline_popup_row(anchor_row: usize, height: usize, rows: usize) -> usize {
@@ -691,12 +966,47 @@ mod tests {
             style: MenuStyle::Prompt,
         };
 
-        let layout = menu_layout(&menu, 40, 12).expect("prompt layout");
+        let layout = menu_layout(&menu, 40, 12, 240, 18).expect("prompt layout");
         assert_eq!(layout.rect.width, 40);
         assert_eq!(layout.rect.height, 2);
         assert_eq!(layout.visible_columns, 6);
         assert_eq!(layout.total_columns, 6);
         assert_eq!(layout.column_width, 6);
+        assert_eq!(layout.top, bottom_overlay_top(240, 18, 3));
+    }
+
+    #[test]
+    fn inline_menu_height_is_limited_by_space_around_anchor() {
+        let menu = MenuState {
+            items: vec![menu_item("alpha"); 10],
+            anchor: Coord { line: 1, column: 3 },
+            selected: Some(0),
+            selected_face: Face::default(),
+            menu_face: Face::default(),
+            style: MenuStyle::Inline,
+        };
+
+        let layout = menu_layout(&menu, 40, 8, 240, 18).expect("inline layout");
+        assert_eq!(layout.rect.height, 6);
+        assert_eq!(layout.rect.row, 2);
+        assert_eq!(layout.rect.column, 3);
+    }
+
+    #[test]
+    fn inline_menu_near_bottom_opens_above_anchor() {
+        let menu = MenuState {
+            items: vec![menu_item("alpha"); 10],
+            anchor: Coord { line: 6, column: 4 },
+            selected: Some(0),
+            selected_face: Face::default(),
+            menu_face: Face::default(),
+            style: MenuStyle::Inline,
+        };
+
+        let layout = menu_layout(&menu, 40, 8, 240, 18).expect("inline layout");
+        assert_eq!(layout.rect.height, 6);
+        assert_eq!(layout.rect.row, 0);
+        assert_eq!(layout.rect.column, 4);
     }
 
     #[test]
@@ -710,7 +1020,7 @@ mod tests {
             style: MenuStyle::Prompt,
         };
 
-        let layout = menu_layout(&menu, 30, 10).expect("prompt layout");
+        let layout = menu_layout(&menu, 30, 10, 240, 18).expect("prompt layout");
         assert_eq!(layout.visible_columns, 2);
         assert_eq!(layout.total_columns, 4);
         assert_eq!(layout.first_visible_item, 2);
@@ -732,9 +1042,10 @@ mod tests {
             style: MenuStyle::Search,
         };
 
-        let layout = menu_layout(&menu, 20, 8).expect("search layout");
+        let layout = menu_layout(&menu, 20, 8, 240, 18).expect("search layout");
         assert!(layout.is_single_row);
         assert_eq!(layout.first_visible_item, 2);
+        assert_eq!(layout.top, bottom_overlay_top(240, 18, 1));
     }
 
     #[test]
@@ -746,16 +1057,38 @@ mod tests {
             face: Face::default(),
             style: InfoStyle::Prompt,
         };
-        let menu = CellRect {
-            row: 8,
-            column: 0,
-            width: 30,
-            height: 2,
+        let menu = PopupRect {
+            rect: CellRect {
+                row: 8,
+                column: 0,
+                width: 30,
+                height: 2,
+            },
+            top: bottom_overlay_top(240, 18, 3),
         };
 
-        let rect = info_rect(&info, Some(menu), 30, 10, 8, 3);
-        assert_eq!(rect.row, 5);
-        assert_eq!(rect.column, 22);
+        let rect = info_rect_with_window(&info, Some(menu), 30, 10, 8, 3, 240, 18);
+        assert_eq!(rect.rect.row, 5);
+        assert_eq!(rect.rect.column, 22);
+        assert_eq!(rect.top, bottom_overlay_top(240, 18, 6));
+    }
+
+    #[test]
+    fn prompt_menu_bottom_edge_stays_fixed_when_cell_height_changes() {
+        let menu = MenuState {
+            items: vec![menu_item("alpha"); 6],
+            anchor: Coord { line: 0, column: 0 },
+            selected: Some(0),
+            selected_face: Face::default(),
+            menu_face: Face::default(),
+            style: MenuStyle::Prompt,
+        };
+
+        let layout_small = menu_layout(&menu, 40, 12, 240, 18).expect("prompt layout");
+        let layout_large = menu_layout(&menu, 40, 9, 240, 24).expect("prompt layout");
+
+        assert_eq!(layout_small.top + layout_small.rect.height * 18, 210);
+        assert_eq!(layout_large.top + layout_large.rect.height * 24, 204);
     }
 
     fn menu_item(text: &str) -> Vec<Atom> {

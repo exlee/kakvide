@@ -824,12 +824,7 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
             }
             Event::AboutToWait => {
                 if let Some(watch) = user_config_watch.as_mut() {
-                    poll_user_config_updates(
-                        watch,
-                        &mut config,
-                        &mut user_keys,
-                        &mut clients,
-                    );
+                    poll_user_config_updates(watch, &mut config, &mut user_keys, &mut clients);
                 }
                 if should_create_fallback_startup_client(
                     startup_open_state,
@@ -980,8 +975,7 @@ fn try_main(raw_args: Vec<OsString>) -> Result<ExitCode> {
                         .handle_command(command, Some(window_id));
                     } else {
                         log_error(
-                            "window command requested before startup session was ready"
-                                .to_string(),
+                            "window command requested before startup session was ready".to_string(),
                         );
                     }
                 } else if remove_client {
@@ -1150,13 +1144,12 @@ mod tests {
 
     use super::{
         KakvideHookInstallState, StartupOpenState, UserConfigWatchState,
-        client_name_from_ui_options, config_error_command,
-        connected_kakoune_args, default_launch_directory, extract_kak_bin,
-        early_exit_output, kakvide_hook_prompt_keys, read_user_config_watch_state,
-        resolve_kakoune_session, should_create_fallback_startup_client,
-        should_handle_startup_open_with_files, should_ignore_startup_open_files,
-        should_show_combined_help, should_update_native_window_title, startup_open_files,
-        startup_open_state_for_launch,
+        client_name_from_ui_options, config_error_command, connected_kakoune_args,
+        default_launch_directory, early_exit_output, extract_kak_bin, kakvide_hook_prompt_keys,
+        read_user_config_watch_state, resolve_kakoune_session,
+        should_create_fallback_startup_client, should_handle_startup_open_with_files,
+        should_ignore_startup_open_files, should_show_combined_help,
+        should_update_native_window_title, startup_open_files, startup_open_state_for_launch,
     };
     use crate::app::{AppConfig, Args};
 
@@ -1310,7 +1303,10 @@ mod tests {
         ));
         let _ = fs::remove_file(&path);
 
-        assert_eq!(read_user_config_watch_state(&path), UserConfigWatchState::Missing);
+        assert_eq!(
+            read_user_config_watch_state(&path),
+            UserConfigWatchState::Missing
+        );
     }
 
     #[test]

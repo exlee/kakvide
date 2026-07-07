@@ -225,9 +225,7 @@ fn load_config_with_env(env_var: impl Fn(&str) -> Option<OsString>) -> Result<Ap
         }
     }
 
-    value
-        .try_into()
-        .context("failed to parse effective config")
+    value.try_into().context("failed to parse effective config")
 }
 
 fn user_config_path_with_env(env_var: impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
@@ -239,7 +237,11 @@ fn checked_config_paths_with_env(env_var: impl Fn(&str) -> Option<OsString>) -> 
     if let Some(xdg_config_home) = env_var("XDG_CONFIG_HOME")
         && !xdg_config_home.is_empty()
     {
-        paths.push(PathBuf::from(xdg_config_home).join("kakvide").join("config.toml"));
+        paths.push(
+            PathBuf::from(xdg_config_home)
+                .join("kakvide")
+                .join("config.toml"),
+        );
         return paths;
     }
 
@@ -644,7 +646,10 @@ mod tests {
 
     #[test]
     fn config_path_is_missing_without_xdg_or_home() {
-        assert_eq!(checked_config_paths_with_env(|_| None), vec![bundled_config_path()]);
+        assert_eq!(
+            checked_config_paths_with_env(|_| None),
+            vec![bundled_config_path()]
+        );
     }
 
     #[test]
@@ -653,8 +658,14 @@ mod tests {
 
         assert_eq!(config.font_family, AppConfig::default().font_family);
         assert_eq!(config.font_size, AppConfig::default().font_size);
-        assert_eq!(config.mouse_scroll_rate, AppConfig::default().mouse_scroll_rate);
-        assert_eq!(config.transparent_menubar, AppConfig::default().transparent_menubar);
+        assert_eq!(
+            config.mouse_scroll_rate,
+            AppConfig::default().mouse_scroll_rate
+        );
+        assert_eq!(
+            config.transparent_menubar,
+            AppConfig::default().transparent_menubar
+        );
         assert_eq!(config.cell, AppConfig::default().cell);
         assert_eq!(config.macos, AppConfig::default().macos);
         assert_eq!(config.keys, AppConfig::default().keys);

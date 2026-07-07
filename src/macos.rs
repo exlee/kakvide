@@ -431,7 +431,9 @@ mod tests {
 
         assert_eq!(
             actual.localizedName().expect("actual should have a name"),
-            expected.localizedName().expect("expected should have a name")
+            expected
+                .localizedName()
+                .expect("expected should have a name")
         );
     }
 
@@ -442,7 +444,9 @@ mod tests {
 
         assert_eq!(
             actual.localizedName().expect("actual should have a name"),
-            expected.localizedName().expect("expected should have a name")
+            expected
+                .localizedName()
+                .expect("expected should have a name")
         );
     }
 }
